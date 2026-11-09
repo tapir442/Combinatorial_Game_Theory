@@ -47,9 +47,9 @@ subtraction games without any changes.
 - [ ] **1.14 Structure of known periods** (4 wk). Build a database of code, period
   and preperiod, then look for arithmetic features that predict period length.
   *Output:* conjectures.  *Needs:* 1.13
-- [ ] **1.15a Arithmetic periodicity (hexadecimal games)** (3 wk). Extend `find_period` /
-  `octalgames` to detect saltus (G(n+p) = G(n) + s) and implement Austin's / Howse–Nowakowski's
-  test.  Resolve the `.f6` discrepancy: Nowakowski reports period 43, saltus 32 from
+- [ ] **1.15a Arithmetic periodicity (hexadecimal games)** (3 wk). Detection of
+  saltus (G(n+p) = G(n) + s) is done in octal-explorer (apparent only).  Remaining:
+  implement Austin's / Howse–Nowakowski's test to *prove* arithmetic periods.  Resolve the `.f6` discrepancy: Nowakowski reports period 43, saltus 32 from
   n = 604, while octal-explorer and CGSuite both break at n = 1929.  *Output:* tool +
   note to Nowakowski.
 - [ ] **1.15 Splitting families** (3 wk). Add rules for Pulleyblank's "split heaps

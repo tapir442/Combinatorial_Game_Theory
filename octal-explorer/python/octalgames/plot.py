@@ -43,23 +43,30 @@ def plot_values(s: NimSequence, ax=None, *, records: bool = True, start: int = 0
 
 def plot_wrap(s: NimSequence, width: Optional[int] = None, mode: str = "values", ax=None, *,
               start: int = 0, rows: Optional[int] = None, bit: int = 0, threshold: int = 1,
-              figsize=(12, 6)):
+              saltus: Optional[int] = None, figsize=(12, 6)):
     """Sequence wrapped in rows of `width` (default: period or best lag).
 
     A period shows as vertical stripes ('values') or as a blank area ('diff').
+    In 'diff' mode cells are dark where G(n) - G(n-W) differs from ``saltus``
+    (default: the detected saltus when ``width`` is the detected period, else 0),
+    so arithmetic periods become blank too.
     """
     if width is None:
         p = s.period
         width = p.period if p and p.period <= 5000 else s.best_lag()
     if rows is None:
         rows = min(-(-(len(s) - start) // width), 1500)
-    img = s.image(width, mode, start=start, rows=rows, bit=bit, threshold=threshold)
+    if mode == "diff" and saltus is None:
+        p = s.period
+        saltus = p.saltus if p and p.period == width else 0
+    img = s.image(width, mode, start=start, rows=rows, bit=bit, threshold=threshold, saltus=saltus)
     ax = _ax(ax, figsize)
     ax.imshow(img, interpolation="nearest", aspect="auto",
               extent=(0, width, start + rows * width, start))
     ax.set_xlabel("column  (n mod width, shifted by start)")
     ax.set_ylabel("n at row start")
-    what = {"values": "values", "diff": "G(n) ≠ G(n−W) in dark red", "zero": "P-positions",
+    diff_txt = (f"G(n) − G(n−W) ≠ {saltus} in dark red" if saltus else "G(n) ≠ G(n−W) in dark red")
+    what = {"values": "values", "diff": diff_txt, "zero": "P-positions",
             "bit": f"bit {bit}", "ge": f"values ≥ {threshold}"}[mode]
     ax.set_title(f"{s.code} wrapped at W = {width}: {what}")
     return ax

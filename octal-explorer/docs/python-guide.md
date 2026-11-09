@@ -28,7 +28,7 @@ s = og.NimSequence.from_csv(".007", "treblecross.csv").extend(1_000_000)
 s.values          # read-only numpy uint16 array
 s[1000:1010]      # slicing works like an array
 len(s), s.max_value
-s.period          # Period(preperiod, period, proven) or None
+s.period          # Period(preperiod, period, proven, saltus) or None; saltus > 0 = arithmetic
 s.records()       # [(n, value), ...] where a new maximum first appears
 s.counts()        # counts[v]
 s.first_occurrence()
@@ -51,6 +51,7 @@ All plot functions are also methods and accept `ax=` to draw into your own figur
 s.plot_values()                      # G(n) with record values
 s.plot_wrap()                        # width = period or best lag
 s.plot_wrap(34, mode="diff", rows=100)
+s.plot_wrap(53, mode="diff", saltus=16)   # arithmetic period: dark where G(n) - G(n-53) != 16
 s.plot_wrap(64, mode="bit", bit=3)
 s.plot_wrap(256, mode="ge", threshold=512)
 s.plot_autocorr(2000)
@@ -78,6 +79,7 @@ s.explore()          # or og.explore(s, width=12)
 | start n, jump to end | which part of the sequence to show (`jump to end` shows the tail, where periodicity lives) |
 | cell px | zoom |
 | mode, bit / thr | values, diff, P-positions, bit plane, values ≥ threshold |
+| saltus | expected G(n) − G(n−W) in `diff` mode (set by the period button) |
 
 The status line counts the cells with \(G(n) \ne G(n-W)\) in view and shows the last
 one.  In `diff` mode at a true period, this is the last exception.

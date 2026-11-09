@@ -78,6 +78,18 @@ The search tries \(p = 1, 2, \dots, N/2\) and returns the first proved period.  
 proved, it returns the smallest apparent one.  Multiples of an apparent period are
 skipped, so a periodic sequence costs \(O(N)\) per candidate rather than \(O(N^2/p)\).
 
+### `octal_period_ex`
+
+```c
+int octal_period_ex(const char *code, const uint16_t *G, long N, long *out);
+```
+
+Like `octal_period`, but it also detects **arithmetic periodicity** \(G(n+p) = G(n) + s\)
+with saltus \(s \ge 0\).  It writes `out[0] = preperiod`, `out[1] = period` and
+`out[2] = saltus`, so `out` needs three entries.  Periods with \(s > 0\) are only ever
+reported as apparent (return 1).  See [Concepts](concepts.md#arithmetic-periodicity-saltus).
+The Python package and the command-line program use this function.
+
 ## Minimal example
 
 ```c

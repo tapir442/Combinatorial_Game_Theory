@@ -63,6 +63,8 @@ def _load():
     lib.octal_extend.restype = ctypes.c_int
     lib.octal_period.argtypes = [ctypes.c_char_p, u16, ctypes.c_long, ctypes.POINTER(ctypes.c_long)]
     lib.octal_period.restype = ctypes.c_int
+    lib.octal_period_ex.argtypes = [ctypes.c_char_p, u16, ctypes.c_long, ctypes.POINTER(ctypes.c_long)]
+    lib.octal_period_ex.restype = ctypes.c_int
     return lib
 
 
@@ -88,8 +90,9 @@ def extend(code: str, values: np.ndarray, start: int, stop: int) -> None:
 
 
 def period(code: str, values: np.ndarray, n: int):
-    out = (ctypes.c_long * 2)()
-    rc = load().octal_period(code.encode(), values, n, out)
+    """(rc, preperiod, period, saltus); rc 0 none, 1 apparent, 2 proved."""
+    out = (ctypes.c_long * 3)()
+    rc = load().octal_period_ex(code.encode(), values, n, out)
     if rc < 0:
         raise ValueError(f"cannot parse game code {code!r}")
-    return rc, out[0], out[1]
+    return rc, out[0], out[1], out[2]

@@ -16,19 +16,27 @@ from . import _lib
 
 @dataclass(frozen=True)
 class Period:
-    """Eventual period of a nim-sequence.
+    """Eventual (arithmetic) period of a nim-sequence: G(n+p) = G(n) + s for n >= i.
 
-    ``proven`` is True when the octal periodicity theorem certifies it
+    ``saltus`` s is 0 for ordinary periodicity and positive for *arithmetic*
+    periodicity (typical of hexadecimal games).
+
+    ``proven`` is True when the octal periodicity theorem certifies the period
     (G(n+p) = G(n) for i <= n < 2i + p + t, t = last code digit).  Otherwise the
-    period is only *apparent*: seen for at least three periods at the end of
-    the computed range.
+    period is only *apparent*: it holds for at least three periods at the end
+    of the computed range (and, if s > 0, for at least a quarter of the data).
+    Arithmetic periods are never reported as proved.
     """
     preperiod: int
     period: int
     proven: bool
+    saltus: int = 0
 
     def __str__(self) -> str:
         kind = "proved" if self.proven else "apparent"
+        if self.saltus:
+            return (f"arithmetic period {self.period}, saltus {self.saltus}, "
+                    f"preperiod {self.preperiod} ({kind})")
         return f"period {self.period}, preperiod {self.preperiod} ({kind})"
 
 
@@ -94,7 +102,7 @@ class NimSequence:
 
     >>> s = NimSequence(".77", 200)       # Kayles
     >>> s.period
-    Period(preperiod=71, period=12, proven=True)
+    Period(preperiod=71, period=12, proven=True, saltus=0)
     """
 
     def __init__(self, code: str, n: int = 0, *, progress: bool = True, chunk_seconds: float = 0.3):
@@ -182,10 +190,10 @@ class NimSequence:
     # ---- analysis
     @property
     def period(self) -> Optional[Period]:
-        """Eventual period (proved or apparent), or None."""
+        """Eventual period (proved or apparent, possibly arithmetic), or None."""
         if self._period_cache is None:
-            rc, pre, per = _lib.period(self.code, self._G, len(self._G))
-            self._period_cache = (Period(pre, per, rc == 2),) if rc else (None,)
+            rc, pre, per, sal = _lib.period(self.code, self._G, len(self._G))
+            self._period_cache = (Period(pre, per, rc == 2, sal),) if rc else (None,)
         return self._period_cache[0]
 
     def records(self):
@@ -309,7 +317,8 @@ class NimSequence:
         return out.reshape(nrows, width)
 
     def image(self, width: int, mode: str = "values", *, start: int = 0, rows: Optional[int] = None,
-              bit: int = 0, threshold: int = 1, cell: int = 1) -> np.ndarray:
+              bit: int = 0, threshold: int = 1, cell: int = 1,
+              saltus: Optional[int] = None) -> np.ndarray:
         """RGB image (uint8, shape ``(rows*cell, width*cell, 3)``) of the wrapped sequence.
 
         Parameters
@@ -318,7 +327,8 @@ class NimSequence:
             Values per row.  Row r, column c shows G(start + r*width + c).
         mode
             ``'values'``: palette colour per value (0 is near-black).
-            ``'diff'``: dark red where G(n) != G(n - width), grey in the first row.
+            ``'diff'``: dark red where G(n) - G(n - width) != saltus, grey in the
+            first row.
             ``'zero'``: P-positions (G = 0) black.
             ``'bit'``: bit ``bit`` of G(n) black.
             ``'ge'``: only values >= ``threshold`` coloured.
@@ -328,6 +338,10 @@ class NimSequence:
             Number of rows (default: all remaining values).
         bit
             Bit index for ``mode='bit'``.
+        saltus
+            For ``mode='diff'``: the expected difference G(n) - G(n - width).
+            Default: the detected saltus if ``width`` is the detected period,
+            otherwise 0.
         threshold
             Threshold for ``mode='ge'``.
         cell
@@ -346,7 +360,10 @@ class NimSequence:
             G = self._G
             ok = valid & (n >= width)
             same = np.zeros_like(valid)
-            same[ok] = G[n[ok]] == G[prev[ok]]
+            if saltus is None:
+                p = self.period
+                saltus = p.saltus if p and p.period == width else 0
+            same[ok] = G[n[ok]].astype(np.int64) - G[prev[ok]].astype(np.int64) == saltus
             img[valid & (n < width)] = (200, 200, 200)
             img[ok & same] = (248, 248, 245)
             img[ok & ~same] = (150, 20, 30)
@@ -390,7 +407,8 @@ class NimSequence:
         return {
             "code": self.code, "name": self.name, "n": len(self),
             "period": p.period if p else None, "preperiod": p.preperiod if p else None,
-            "proven": p.proven if p else False, "max_value": mx,
+            "proven": p.proven if p else False, "saltus": p.saltus if p else None,
+            "max_value": mx,
             "max_at": int(np.argmax(self._G)) if len(self) else None,
             "p_positions": int(np.count_nonzero(self._G == 0)),
             "seconds": round(self.seconds, 3),
@@ -441,7 +459,7 @@ def compute(code: str, n: int, **kw) -> NimSequence:
     --------
     >>> import octalgames as og
     >>> og.compute(".77", 300).period          # Kayles
-    Period(preperiod=71, period=12, proven=True)
+    Period(preperiod=71, period=12, proven=True, saltus=0)
     """
     return NimSequence(code, n, **kw)
 

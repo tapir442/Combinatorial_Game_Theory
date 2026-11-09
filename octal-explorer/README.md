@@ -35,7 +35,7 @@ Examples: `.77` Kayles, `.07` Dawson's Kayles, `.137` Dawson's chess, `.6` Offic
 import octalgames as og
 s = og.compute(".007", 100_000)   # interruptible; values so far are kept
 s                                  # summary table
-s.period                           # Period(preperiod, period, proven) or None
+s.period                           # Period(preperiod, period, proven, saltus) or None
 s.extend(300_000)                  # continue later
 s.plot_values(); s.plot_wrap(mode="diff"); s.plot_autocorr(); s.plot_histogram()
 s.dashboard()                      # all of the above

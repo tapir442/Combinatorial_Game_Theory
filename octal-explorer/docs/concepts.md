@@ -70,6 +70,36 @@ octal-explorer reports:
   data (\(N - i \ge 3p\)) but the theorem does not apply or needs more values.
 - **none** otherwise.
 
+### Arithmetic periodicity (saltus)
+
+Hexadecimal games can split a heap into three, and their values can grow without
+bound.  The right notion is then **arithmetic periodicity**: a preperiod \(i\), a period
+\(p\) and a **saltus** \(s\) with
+
+\[
+G(n + p) = G(n) + s \quad\text{for all } n \ge i.
+\]
+
+Ordinary periodicity is \(s = 0\).  octal-explorer also looks for these.  For each
+candidate \(p\) it takes \(s = G(N-1) - G(N-1-p)\) from the end of the data and finds
+the earliest \(i\) from which the relation holds.
+
+- Arithmetic periods are reported as **apparent**, never as proved.  Verifying them needs
+  Austin's theorem or its generalisation by Howse and Nowakowski, which is not
+  implemented.
+- To avoid chance matches, an arithmetic period must hold for at least three periods
+  **and** at least a quarter of the computed values.
+
+| Game | Detected (n < 1500) |
+|---|---|
+| `.28`, `.29` | period 53, saltus 16, preperiod 1 (matches Nowakowski, A3) |
+| `.9c` | period 36, saltus 16, preperiod 28 (matches A3) |
+| `.f6` | period 43, saltus 32, preperiod 604 up to n ≈ 1900; **none** from n ≈ 1930 |
+
+In `diff` pictures, use the saltus: cells are dark where \(G(n) - G(n-W) \ne s\).  When
+the width is the detected period, the detected saltus is used automatically, so
+arithmetic periods also show up as blank areas.
+
 !!! warning
     "No period found" only means that none is visible within the computed range.
     Some solved games have enormous periods: `.106` has preperiod 465,384,263,797 and

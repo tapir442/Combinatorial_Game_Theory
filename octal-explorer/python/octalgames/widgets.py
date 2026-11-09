@@ -35,10 +35,13 @@ def explore(s: NimSequence, width=None, *, max_pixels: int = 1400):
     start = w.BoundedIntText(value=0, min=0, max=max(0, len(s) - 1), step=1, description="start n",
                              layout=w.Layout(width="200px"))
     cell = w.BoundedIntText(value=4, min=1, max=24, description="cell px", layout=w.Layout(width="150px"))
-    mode = w.Dropdown(options=[("values", "values"), ("diff  G(n) ≠ G(n−W)", "diff"),
+    mode = w.Dropdown(options=[("values", "values"), ("diff  G(n) − G(n−W) ≠ saltus", "diff"),
                                ("P-positions", "zero"), ("bit plane", "bit"), ("values ≥ threshold", "ge")],
                       value="values", description="mode", layout=w.Layout(width="260px"))
     bit = w.BoundedIntText(value=0, min=0, max=15, description="bit / thr", layout=w.Layout(width="160px"))
+    saltus = w.IntText(value=p.saltus if p and p.period == width else 0, description="saltus",
+                       layout=w.Layout(width="150px"),
+                       tooltip="diff mode compares G(n) - G(n-W) with this value")
     btns = [w.Button(description=d, layout=w.Layout(width="52px")) for d in ("−1", "+1", "×2", "÷2")]
     per_btn = w.Button(description=f"period {p.period}" if p else "best lag",
                        layout=w.Layout(width="120px"))
@@ -54,7 +57,7 @@ def explore(s: NimSequence, width=None, *, max_pixels: int = 1400):
         cs = max(1, min(cell.value, max(1, 4000 // Wv)))
         rows = rows_for(Wv, cs)
         a = s.image(Wv, mode.value, start=start.value, rows=rows, bit=bit.value,
-                    threshold=bit.value, cell=cs)
+                    threshold=bit.value, cell=cs, saltus=saltus.value)
         img.value = _png(a)
         img.layout.width = f"{a.shape[1]}px"
         end = min(len(s), start.value + rows * Wv)
@@ -63,9 +66,11 @@ def explore(s: NimSequence, width=None, *, max_pixels: int = 1400):
             G = s.values
             lo = max(start.value, Wv)
             if end > lo:
-                mism = np.flatnonzero(G[lo:end] != G[lo - Wv:end - Wv])
+                d = G[lo:end].astype(np.int64) - G[lo - Wv:end - Wv].astype(np.int64)
+                mism = np.flatnonzero(d != saltus.value)
                 last = f", last at n = {lo + mism[-1]}" if len(mism) else ""
-                extra = f" · G(n) ≠ G(n−{Wv}) at {len(mism):,} places in view{last}"
+                rel = f"G(n) − G(n−{Wv}) ≠ {saltus.value}" if saltus.value else f"G(n) ≠ G(n−{Wv})"
+                extra = f" · {rel} at {len(mism):,} places in view{last}"
         info.value = (f"<code>rows {rows}, n = {start.value:,} … {end - 1:,} · values ≤ "
                       f"{int(s.values[start.value:end].max()) if end > start.value else 0}{extra}</code>")
 
@@ -76,19 +81,26 @@ def explore(s: NimSequence, width=None, *, max_pixels: int = 1400):
     btns[1].on_click(lambda _: setW(W.value + 1))
     btns[2].on_click(lambda _: setW(W.value * 2))
     btns[3].on_click(lambda _: setW(W.value // 2))
-    per_btn.on_click(lambda _: setW(p.period if p else s.best_lag()))
+    def use_period(_):
+        if p:
+            saltus.value = p.saltus
+            setW(p.period)
+        else:
+            setW(s.best_lag())
+
+    per_btn.on_click(use_period)
 
     def to_end(_):
         cs = max(1, min(cell.value, max(1, 4000 // W.value)))
         start.value = max(0, len(s) - (max_pixels // cs) * W.value)
 
     tail_btn.on_click(to_end)
-    for c in (W, start, cell, mode, bit):
+    for c in (W, start, cell, mode, bit, saltus):
         c.observe(redraw, names="value")
     redraw()
     controls = w.VBox([
         w.HBox([W, Wsl, *btns, per_btn]),
-        w.HBox([start, tail_btn, cell, mode, bit]),
+        w.HBox([start, tail_btn, cell, mode, bit, saltus]),
         info,
     ])
     return w.VBox([w.HTML(f"<b>{s.name}</b> — {len(s):,} values, "

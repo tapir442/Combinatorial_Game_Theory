@@ -88,10 +88,11 @@ typedef struct {
     long long pairs;     /**< two-heap pairs examined (work counter) */
 } Result;
 
-/** @brief Eventual period found by find_period(). */
+/** @brief Eventual (arithmetic) period found by find_period(). */
 typedef struct {
-    long pre, per;       /**< preperiod i and period p: G(n+p) = G(n) for n >= i */
+    long pre, per;       /**< preperiod i and period p: G(n+p) = G(n) + saltus for n >= i */
     int found, proven;   /**< found: a period was detected; proven: certified by the theorem */
+    long saltus;         /**< saltus s (0 = ordinary periodicity) */
 } Period;
 
 /** Suppress progress and summary output (`-q`).  Command-line program only; set
@@ -503,34 +504,48 @@ static Result compute(const Rule *R, long N, int allow_sparse) {
 /* ------------------------------------------------------------ periodicity */
 
 /**
- * @brief Find an eventual period of G[0..N).
+ * @brief Find an eventual period of G[0..N), optionally with a saltus.
  *
  * For p = 1, 2, ..., N/2 the preperiod i is the smallest index with
- * G(n) = G(n+p) for all i <= n < N-p (found by scanning backwards).
+ * G(n+p) = G(n) + s for all i <= n < N-p (found by scanning backwards).  The
+ * saltus s is 0, or, if @p allow_saltus is set, the difference G(N-1) -
+ * G(N-1-p) at the end of the data (negative differences are treated as 0).
+ * s > 0 is *arithmetic periodicity*, typical of hexadecimal games.
  *
  * Octal periodicity theorem (Winning Ways, ch. 4): if G(n+p) = G(n) for all
  * i <= n < 2i + p + t, where t is the last nonzero code digit, the sequence is
  * periodic from i on.  So p is *proved* once N >= 2i + 2p + t; this is only
  * claimed for plain octal codes (no d0, no hex digits, no named rules).
  *
+ * Arithmetic periods (s > 0) are never reported as proved: verifying them
+ * needs Austin's theorem or its generalisation by Howse and Nowakowski, which
+ * is not implemented.
+ *
  * Returns the first proved period; otherwise the smallest p with N - i >= 3p
- * as an *apparent* period (multiples of it are skipped, keeping the search
- * linear for periodic data); otherwise found = 0.
+ * (and, for s > 0, also N - i >= N/4) as an *apparent* period (multiples of it
+ * are skipped, keeping the search linear for periodic data); otherwise
+ * found = 0.
  */
-static Period find_period(const uint16_t *G, long N, const Rule *R) {
+static Period find_period(const uint16_t *G, long N, const Rule *R, int allow_saltus) {
     int can_prove = R->special == SP_NONE && R->d[0] == 0 && !R->hex;
     Period ap = {0};
     for (long p = 1; p <= N / 2; p++) {
         if (ap.found && p % ap.per == 0) continue;
+        long s = allow_saltus ? (long)G[N - 1] - (long)G[N - 1 - p] : 0;
+        if (s < 0) s = 0;
         long n = N - p - 1;
-        while (n >= 0 && G[n] == G[n + p]) n--;
+        while (n >= 0 && (long)G[n + p] - (long)G[n] == s) n--;
         long i = n + 1;
-        if (can_prove && (long long)N >= 2LL * i + 2LL * p + R->t) {
-            Period r = {i, p, 1, 1};
+        if (s == 0 && can_prove && (long long)N >= 2LL * i + 2LL * p + R->t) {
+            Period r = {i, p, 1, 1, 0};
             return r;
         }
-        if (!ap.found && N - i >= 3 * p) {
-            ap.pre = i; ap.per = p; ap.found = 1;
+        /* apparent: at least 3 periods; with a saltus also at least N/4 values,
+         * since short runs like G rising by 1 three times occur by chance */
+        long need = 3 * p;
+        if (s > 0 && need < N / 4) need = N / 4;
+        if (!ap.found && N - i >= need) {
+            ap.pre = i; ap.per = p; ap.found = 1; ap.saltus = s;
         }
     }
     return ap;
@@ -737,10 +752,11 @@ static WrapLayout wrap_layout(long N, int W) {
  * @param N     number of values
  * @param W     row width
  * @param diff  0: colour cells by value (palette());
- *              1: dark red where G(n) != G(n-W), light otherwise, grey in the first row
+ *              1: dark red where G(n) - G(n-W) != saltus, light otherwise, grey in the first row
+ * @param saltus expected difference G(n) - G(n-W) in diff mode (0 = ordinary periodicity)
  * @param path  output file
  */
-static void plot_wrap(const uint16_t *G, long N, int W, int diff, const char *path) {
+static void plot_wrap(const uint16_t *G, long N, int W, int diff, long saltus, const char *path) {
     WrapLayout L = wrap_layout(N, W);
     int iw = W * L.cs, ih = (L.rows_top + L.rows_bot) * L.cs + L.sep;
     Image im = img_new(iw, ih, 255, 255, 255);
@@ -755,7 +771,7 @@ static void plot_wrap(const uint16_t *G, long N, int W, int diff, const char *pa
                 uint8_t col[3];
                 if (!diff) palette(G[n], col);
                 else if (n < W) { col[0] = col[1] = col[2] = 200; }
-                else if (G[n] == G[n - W]) { col[0] = 248; col[1] = 248; col[2] = 245; }
+                else if ((long)G[n] - (long)G[n - W] == saltus) { col[0] = 248; col[1] = 248; col[2] = 245; }
                 else { col[0] = 150; col[1] = 20; col[2] = 30; }
                 rect(&im, c * L.cs, y0 + r * L.cs, (c + 1) * L.cs, y0 + (r + 1) * L.cs, col);
             }
@@ -882,7 +898,10 @@ static void write_html(const char *dir, const Rule *R, const Result *res, const 
     if (!f) { perror(path); exit(1); }
     long M = res->N < embed ? res->N : embed;
     char per[256];
-    if (P->found)
+    if (P->found && P->saltus)
+        snprintf(per, sizeof per, "Apparent (unproved) arithmetic period %ld, saltus %ld, preperiod %ld: "
+                 "G(n+%ld) = G(n) + %ld", P->per, P->saltus, P->pre, P->per, P->saltus);
+    else if (P->found)
         snprintf(per, sizeof per, "%s period %ld, preperiod %ld", P->proven ? "Proved:" : "Apparent (unproved):",
                  P->per, P->pre);
     else
@@ -932,10 +951,11 @@ static void write_html(const char *dir, const Rule *R, const Result *res, const 
 "%s"
 "<label>Cell <input id=\"cs\" type=\"number\" min=\"1\" max=\"24\" value=\"4\"> px</label>\n"
 "<label>Start n <input id=\"st\" type=\"number\" min=\"0\" value=\"0\" step=\"1\"></label>\n"
-"<label>Mode <select id=\"mode\"><option value=\"val\">values</option><option value=\"diff\">diff: G(n) ≠ G(n−W)</option>"
+"<label>Mode <select id=\"mode\"><option value=\"val\">values</option><option value=\"diff\">diff: G(n) − G(n−W) ≠ saltus</option>"
 "<option value=\"zero\">P-positions (G = 0)</option><option value=\"bit\">bit plane</option>"
 "<option value=\"rare\">rare values</option><option value=\"rec\">≥ threshold</option></select></label>\n"
 "<label>Bit / threshold <input id=\"bit\" type=\"number\" min=\"0\" value=\"0\"></label>\n"
+"<label title=\"diff mode compares G(n) - G(n-W) with this value (arithmetic periodicity)\">Saltus <input id=\"sal\" type=\"number\" value=\"0\"></label>\n"
 "</div><div id=\"info\" class=\"mut\">hover over the picture</div><div id=\"cvwrap\"><canvas id=\"cv\"></canvas></div></div>\n",
             M, wrapW,
             P->found ? "<button id=\"wper\">use period</button>\n" : "");
@@ -948,7 +968,8 @@ static void write_html(const char *dir, const Rule *R, const Result *res, const 
 "<p class=\"mut\">Each row holds W consecutive values, coloured by value (0 is near-black; colours match the histogram). "
 "If the sequence is long, the first and last rows are shown either side of a red line.</p>\n"
 "<img src=\"wrapdiff.png\" alt=\"difference with previous row\">\n"
-"<p class=\"mut\">Dark red: G(n) ≠ G(n−W). Once the preperiod ends, a period W leaves only light cells.</p></div>\n"
+"<p class=\"mut\">Dark red: G(n) − G(n−W) differs from the saltus (0, or the detected saltus when W is the detected period). "
+"Once the preperiod ends, an (arithmetic) period W leaves only light cells.</p></div>\n"
 "<h2>Autocorrelation</h2><div class=\"card\"><img src=\"autocorr.png\" alt=\"autocorrelation\">\n"
 "<p class=\"mut\">For lag p = 1 … %d (left to right), bar height is the fraction of n in the second half with G(n) = G(n+p). "
 "The best lag is red (p = %d)%s.</p></div>\n"
@@ -962,7 +983,8 @@ static void write_html(const char *dir, const Rule *R, const Result *res, const 
 
     fprintf(f, "<script>\nconst G=new Uint16Array([");
     for (long n = 0; n < M; n++) fprintf(f, "%s%u", n ? (n % 40 ? "," : ",\n") : "", res->G[n]);
-    fprintf(f, "]);\nconst PER=%ld, MASK=%u;\n", P->found ? P->per : 0L, res->sparse ? res->mask : 0u);
+    fprintf(f, "]);\nconst PER=%ld, SALTUS=%ld, MASK=%u;\n", P->found ? P->per : 0L,
+            P->found ? P->saltus : 0L, res->sparse ? res->mask : 0u);
     fputs(
 "function hsv(h,s,v){const i=Math.floor(h*6),f=h*6-i,p=v*(1-s),q=v*(1-f*s),t=v*(1-(1-f)*s);\n"
 " const m=[[v,t,p],[q,v,p],[p,v,t],[p,q,v],[t,p,v],[v,p,q]][i%6];return m.map(x=>Math.round(255*x));}\n"
@@ -971,13 +993,13 @@ static void write_html(const char *dir, const Rule *R, const Result *res, const 
 "const $=id=>document.getElementById(id),cv=$('cv'),ctx=cv.getContext('2d');\n"
 "let cs=4,W=1,start=0;\n"
 "function draw(){W=Math.max(1,+$('w').value|0);cs=Math.max(1,+$('cs').value|0);if(W*cs>6000)cs=Math.max(1,Math.floor(6000/W));\n"
-" start=Math.max(0,+$('st').value|0);const mode=$('mode').value,b=+$('bit').value|0;\n"
+" start=Math.max(0,+$('st').value|0);const mode=$('mode').value,b=+$('bit').value|0,sal=+$('sal').value|0;\n"
 " const rows=Math.max(1,Math.min(Math.ceil((G.length-start)/W),Math.floor(3000/cs)));\n"
 " cv.width=W*cs;cv.height=rows*cs;const img=ctx.createImageData(cv.width,cv.height),d=img.data;\n"
 " for(let r=0;r<rows;r++)for(let c=0;c<W;c++){const n=start+r*W+c;let k;\n"
 "  if(n>=G.length)k=[255,255,255];else{const g=G[n];\n"
 "   if(mode==='val')k=col(g);\n"
-"   else if(mode==='diff')k=n<W?[200,200,200]:(G[n-W]===g?[248,248,245]:[150,20,30]);\n"
+"   else if(mode==='diff')k=n<W?[200,200,200]:(g-G[n-W]===sal?[248,248,245]:[150,20,30]);\n"
 "   else if(mode==='zero')k=g===0?[20,20,20]:[245,245,245];\n"
 "   else if(mode==='bit')k=(g>>b)&1?[20,20,20]:[245,245,245];\n"
 "   else if(mode==='rare')k=MASK&&par(g&MASK)?[200,30,30]:[240,240,240];\n"
@@ -986,10 +1008,11 @@ static void write_html(const char *dir, const Rule *R, const Result *res, const 
 " ctx.putImageData(img,0,0);}\n"
 "cv.addEventListener('mousemove',e=>{const R=cv.getBoundingClientRect(),x=(e.clientX-R.left)*cv.width/R.width,y=(e.clientY-R.top)*cv.height/R.height;\n"
 " const n=start+Math.floor(y/cs)*W+Math.floor(x/cs);$('info').textContent=n<G.length?`n = ${n}   G(n) = ${G[n]}   row ${Math.floor(y/cs)}, column ${Math.floor(x/cs)}`:'';});\n"
-"for(const id of['w','cs','st','mode','bit'])$(id).addEventListener('input',draw);\n"
+"for(const id of['w','cs','st','mode','bit','sal'])$(id).addEventListener('input',draw);\n"
 "const setW=v=>{$('w').value=Math.max(1,v);draw();};\n"
 "$('wm').onclick=()=>setW(W-1);$('wp').onclick=()=>setW(W+1);$('wd').onclick=()=>setW(W*2);$('wh').onclick=()=>setW(Math.floor(W/2));\n"
-"if($('wper'))$('wper').onclick=()=>setW(PER);\n"
+"if($('wper'))$('wper').onclick=()=>{$('sal').value=SALTUS;setW(PER);};\n"
+"if(+$('w').value===PER)$('sal').value=SALTUS;\n"
 "document.addEventListener('keydown',e=>{if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT')return;\n"
 " if(e.key==='ArrowLeft')setW(W-1);if(e.key==='ArrowRight')setW(W+1);});\n"
 "draw();\n</script>\n</main></body></html>\n", f);
@@ -1037,14 +1060,26 @@ int octal_extend(const char *code, uint16_t *G, long from, long to) {
     return rc;
 }
 
-/** See octal.h.  Wraps find_period(): returns 0 none, 1 apparent, 2 proved
- *  (-1 bad code) and stores out[0] = preperiod, out[1] = period. */
+/** See octal.h.  Wraps find_period() without saltus: returns 0 none,
+ *  1 apparent, 2 proved (-1 bad code); out[0] = preperiod, out[1] = period. */
 int octal_period(const char *code, const uint16_t *G, long N, long *out) {
     Rule R;
     if (parse_rule(code, &R)) return -1;
-    Period P = find_period(G, N, &R);
+    Period P = find_period(G, N, &R, 0);
     out[0] = P.pre;
     out[1] = P.per;
+    return P.found ? (P.proven ? 2 : 1) : 0;
+}
+
+/** See octal.h.  Like octal_period() but also detects arithmetic periodicity:
+ *  out[0] = preperiod, out[1] = period, out[2] = saltus. */
+int octal_period_ex(const char *code, const uint16_t *G, long N, long *out) {
+    Rule R;
+    if (parse_rule(code, &R)) return -1;
+    Period P = find_period(G, N, &R, 1);
+    out[0] = P.pre;
+    out[1] = P.per;
+    out[2] = P.saltus;
     return P.found ? (P.proven ? 2 : 1) : 0;
 }
 
@@ -1135,7 +1170,7 @@ int main(int argc, char **argv) {
     for (long n = 0, rec = -1; n < N; n++)
         if ((long)res.G[n] > rec) { rec = res.G[n]; recn[nrec] = n; recv[nrec++] = res.G[n]; }
 
-    Period P = find_period(res.G, N, &R);
+    Period P = find_period(res.G, N, &R, 1);
     if (L > N / 3) L = (int)(N / 3);
     if (L < 1) L = 1;
     double *ac = autocorr(res.G, N, L);
@@ -1162,8 +1197,9 @@ int main(int argc, char **argv) {
     fclose(f);
 
     join(path, sizeof path, dir, "values.png");    plot_values(res.G, N, maxG, path);
-    join(path, sizeof path, dir, "wrap.png");      plot_wrap(res.G, N, W, 0, path);
-    join(path, sizeof path, dir, "wrapdiff.png");  plot_wrap(res.G, N, W, 1, path);
+    long wsal = P.found && W == P.per ? P.saltus : 0;   /* saltus for the diff picture */
+    join(path, sizeof path, dir, "wrap.png");      plot_wrap(res.G, N, W, 0, 0, path);
+    join(path, sizeof path, dir, "wrapdiff.png");  plot_wrap(res.G, N, W, 1, wsal, path);
     join(path, sizeof path, dir, "autocorr.png");  plot_autocorr(ac, L, P.found ? (int)P.per : 0, peak, path);
     join(path, sizeof path, dir, "histogram.png"); plot_hist(cnt, maxG, path);
     write_html(dir, &R, &res, &P, maxG, maxat, W, peak, L, embed, recn, recv, nrec);
@@ -1183,7 +1219,10 @@ int main(int argc, char **argv) {
             fprintf(g, "rare mask       0x%x, %ld rare heap sizes (%.3f%%)\n", res.mask, res.nrare,
                     100.0 * res.nrare / N);
         fprintf(g, "max value       %u at n = %ld\n", maxG, maxat);
-        if (P.found)
+        if (P.found && P.saltus)
+            fprintf(g, "period          %ld, saltus %ld, preperiod %ld (arithmetic; apparent only, not proved)\n",
+                    P.per, P.saltus, P.pre);
+        else if (P.found)
             fprintf(g, "period          %ld, preperiod %ld (%s)\n", P.per, P.pre,
                     P.proven ? "PROVED by the periodicity theorem" : "apparent only, not proved");
         else

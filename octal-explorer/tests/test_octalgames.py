@@ -123,3 +123,23 @@ def test_plot_folded_kinds():
     for kind in ("profile", "heatmap"):
         assert s.plot_folded(64, kind) is not None
     assert len(s.plot_folded(64, "both")) == 2
+
+
+def test_arithmetic_periodicity_hexadecimal():
+    # Nowakowski, Problem A3: .28 = .29 period 53 saltus 16 (only G(0) exceptional),
+    # .9c period 36, preperiod 28, saltus 16.  Arithmetic periods are never "proved".
+    for code, exp in ((".28", (1, 53, 16)), (".29", (1, 53, 16)), (".9c", (28, 36, 16))):
+        p = og.compute(code, 1500, progress=False).period
+        assert (p.preperiod, p.period, p.saltus, p.proven) == (*exp, False), (code, p)
+    s = og.compute(".28", 1500, progress=False)
+    img = s.image(53, "diff")                      # saltus taken from the detected period
+    dark = np.argwhere((img == (150, 20, 30)).all(axis=2))
+    assert dark.tolist() == [[1, 0]]               # only n = 53: G(53) - G(0) = 15, G(0) exceptional
+
+
+def test_ordinary_periods_unchanged_and_f6_breaks():
+    assert og.compute(".77", 300, progress=False).period == og.Period(71, 12, True, 0)
+    # .f6 looks like period 43, saltus 32 from 604 up to n ~ 1900, but not beyond
+    p = og.compute(".f6", 1900, progress=False).period
+    assert (p.preperiod, p.period, p.saltus) == (604, 43, 32)
+    assert og.compute(".f6", 2500, progress=False).period is None
