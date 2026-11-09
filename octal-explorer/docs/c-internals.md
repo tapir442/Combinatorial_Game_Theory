@@ -29,7 +29,10 @@ start of each computation, which is why the library is not thread-safe.
   `a ≤ b ≤ c`.
 - `grundy_brute` additionally marks every two-heap split `a + b = n − k` with
   `1 ≤ a ≤ b`, skipping `a == b` for Grundy's game and `n == 2` for Couples.  It then
-  scans for the first unmarked value.
+  returns `mex(st)`.
+- `mex(st)` and `mex_from(start, st)` return the smallest value (≥ `start`) not marked
+  with stamp `st`.  The sparse mode uses `mex_from` to resume from its current lower
+  bound.
 - The size of `seen` grows as values grow (`ensure_seen`).  The table stays twice the
   smallest power of two above the largest value, so every XOR of values fits.
 

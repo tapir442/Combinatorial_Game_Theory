@@ -172,6 +172,19 @@ static inline int is_rare(unsigned v, unsigned mask) {
     return __builtin_parity(v & mask);
 }
 
+/* Minimal excludant: the smallest value >= start not marked with stamp st
+ * (seen[v] == st means "v is the value of an option of the current heap").
+ * The caller must have marked all options of interest beforehand. */
+static inline unsigned mex_from(unsigned start, uint32_t st) {
+    unsigned v = start;
+    while (seen[v] == st) v++;
+    return v;
+}
+
+static inline unsigned mex(uint32_t st) {
+    return mex_from(0, st);
+}
+
 /* Mark values of 0-, 1- and 3-heap moves (never sparse). */
 static void mark_simple(const Rule *R, const uint16_t *G, long n, uint32_t st) {
     int tmax = R->t < n ? R->t : (int)n;
@@ -209,9 +222,7 @@ static unsigned grundy_brute(const Rule *R, const uint16_t *G, long n, long long
         }
         *pairs += m / 2;
     }
-    unsigned v = 0;
-    while (seen[v] == st) v++;
-    return v;
+    return mex(st);
 }
 
 static unsigned grundy_sparse(const Rule *R, const uint16_t *G, long n, unsigned mask,
@@ -230,8 +241,7 @@ static unsigned grundy_sparse(const Rule *R, const uint16_t *G, long n, unsigned
             seen[G[a] ^ G[b]] = st;
         }
     }
-    unsigned lo = 0;
-    while (seen[lo] == st) lo++;
+    unsigned lo = mex(st);
     if (is_rare(lo, mask)) return lo;
     /* confirm common values by scanning pairs; stop once the gap is rare */
     for (int k = 0; k <= tmax; k++) {
@@ -245,7 +255,7 @@ static unsigned grundy_sparse(const Rule *R, const uint16_t *G, long n, unsigned
             seen[x] = st;
             (*pairs)++;
             if (x == lo) {
-                while (seen[lo] == st) lo++;
+                lo = mex_from(lo, st);
                 if (is_rare(lo, mask)) return lo;
             }
         }
