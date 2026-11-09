@@ -55,4 +55,11 @@ bench: lib
 bench-quick: lib
 	uv run python benchmarks/bench_cgsuite.py --cgsuite $(CGSUITE) --quick --out /tmp/octal-bench-quick
 
-.PHONY: all lib test clean venv pytest lab docs docs-build bench bench-quick
+# C reference documentation with Doxygen (output: doxygen/html/index.html)
+doxygen:
+	@command -v doxygen >/dev/null || { echo "doxygen not found (e.g. apt install doxygen)"; exit 1; }
+	mkdir -p doxygen
+	doxygen Doxyfile
+	@test -s doxygen/warnings.log && cat doxygen/warnings.log || echo "doxygen: no warnings"
+
+.PHONY: all lib test clean venv pytest lab docs docs-build bench bench-quick doxygen

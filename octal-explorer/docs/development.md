@@ -35,8 +35,12 @@ check.  Compare new rule types against it too.
 
 Every type, global and function in `octal.c` and `octal.h` has a Doxygen-style
 comment (`/** ... */`, with `@param`, `@return` and `/**< */` for struct fields).
-Keep that style for new code.  `doxygen -g` followed by `doxygen` produces an HTML
-reference if you want one; Doxygen is not required for the build.
+Keep that style for new code.
+
+`make doxygen` builds an HTML reference of the C code into `doxygen/html/index.html`
+with the settings in `Doxyfile`.  It includes static functions, browsable source, and
+call and caller graphs.  It needs `doxygen` (`apt install doxygen`) and Graphviz.
+Warnings go to `doxygen/warnings.log`.  Doxygen is not needed for the normal build.
 
 ## Adding a rule type
 

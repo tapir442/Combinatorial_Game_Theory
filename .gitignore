@@ -1,0 +1,10 @@
+# Emacs
+*~
+\#*\#
+.\#*
+*.elc
+.saves-*
+auto-save-list/
+tramp
+flycheck_*.el
+.dir-locals-2.el
