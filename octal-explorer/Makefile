@@ -14,8 +14,13 @@ lib: $(LIB)
 $(LIB): octal.c octal.h
 	$(CC) $(CFLAGS) -Wno-unused-function -shared -fPIC -DOCTAL_NO_MAIN -o $@ $< $(LDLIBS)
 
-# Sanity checks: sparse vs brute force, and known periods
-test: octal
+# Thread-safety: 8 threads at once under ThreadSanitizer, compared with a sequential run
+test-threads: tests/thread_test.c octal.c octal.h
+	$(CC) -O1 -g -fsanitize=thread -DOCTAL_NO_MAIN -Wno-unused-function -o /tmp/octal-thread-test tests/thread_test.c octal.c -lz -lm -lpthread
+	TSAN_OPTIONS=halt_on_error=1 /tmp/octal-thread-test
+
+# Sanity checks: sparse vs brute force, known periods, thread safety
+test: octal test-threads
 	./octal .007 -n 20000 --check
 	./octal .6 -n 5000 --sparse -q -o /tmp/octal-test-sp
 	./octal .6 -n 20000 --check
@@ -62,4 +67,4 @@ doxygen:
 	doxygen Doxyfile
 	@test -s doxygen/warnings.log && cat doxygen/warnings.log || echo "doxygen: no warnings"
 
-.PHONY: all lib test clean venv pytest lab docs docs-build bench bench-quick doxygen
+.PHONY: all lib test test-threads clean venv pytest lab docs docs-build bench bench-quick doxygen

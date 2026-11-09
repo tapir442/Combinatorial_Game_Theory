@@ -17,7 +17,9 @@ import numpy as np
 _HERE = Path(__file__).resolve().parent
 _SOURCES = [_HERE.parent.parent / "octal.c", _HERE / "octal.c"]
 _lib = None
-lock = threading.Lock()  # the C backend keeps a global scratch table
+# Only loading/building is serialised.  The C functions are reentrant and run
+# without the GIL (ctypes releases it), so computations in threads run in parallel.
+_load_lock = threading.Lock()
 
 
 class BackendError(RuntimeError):
@@ -37,6 +39,13 @@ def load():
     global _lib
     if _lib is not None:
         return _lib
+    with _load_lock:
+        if _lib is None:
+            _lib = _load()
+    return _lib
+
+
+def _load():
     path = Path(os.environ.get("OCTALGAMES_LIB", _HERE / "liboctal.so"))
     src = next((s for s in _SOURCES if s.exists()), None)
     if "OCTALGAMES_LIB" not in os.environ and src is not None:
@@ -54,7 +63,6 @@ def load():
     lib.octal_extend.restype = ctypes.c_int
     lib.octal_period.argtypes = [ctypes.c_char_p, u16, ctypes.c_long, ctypes.POINTER(ctypes.c_long)]
     lib.octal_period.restype = ctypes.c_int
-    _lib = lib
     return lib
 
 
@@ -66,13 +74,17 @@ def rule_name(code: str) -> str:
 
 
 def extend(code: str, values: np.ndarray, start: int, stop: int) -> None:
-    """Fill values[start:stop] in place (values[:start] must be valid)."""
-    with lock:
-        rc = load().octal_extend(code.encode(), values, start, stop)
+    """Fill values[start:stop] in place (values[:start] must be valid).
+
+    Thread-safe; releases the GIL while the C code runs.
+    """
+    rc = load().octal_extend(code.encode(), values, start, stop)
     if rc == -1:
         raise ValueError(f"cannot parse game code {code!r}")
     if rc == -2:
         raise OverflowError("nim-value exceeds 65535")
+    if rc == -3:
+        raise MemoryError("octal backend: out of memory")
 
 
 def period(code: str, values: np.ndarray, n: int):

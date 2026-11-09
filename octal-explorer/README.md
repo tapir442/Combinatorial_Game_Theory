@@ -13,7 +13,7 @@ http://127.0.0.1:8000.
 ```sh
 make            # builds ./octal and python/octalgames/liboctal.so (needs gcc + zlib)
 uv sync --extra jupyter   # creates .venv with numpy, matplotlib, ipywidgets, pandas, jupyterlab
-uv run pytest             # 17 tests: C vs a pure-Python reference, known periods, doc examples
+uv run pytest             # 19 tests: C vs a pure-Python reference, known periods, threads, doc examples
 uv run jupyter lab notebooks/explore_octal_games.ipynb
 ```
 
@@ -84,5 +84,6 @@ values of `.007` take 5.6 s against 73 s.  See `docs/benchmark.md` and
   .007 or .6 on one core.
 - `--sparse` (CLI only) is an experimental rare/common-value variant.  It is checked
   against brute force but is not faster on .6 or .007.
-- The C backend uses a global scratch table, so Python calls are serialised with a lock.
+- The C library is thread-safe (no global state).  Python threads compute different games
+  in parallel, since ctypes releases the GIL.
 - Values are stored as 16-bit integers (max 65535).

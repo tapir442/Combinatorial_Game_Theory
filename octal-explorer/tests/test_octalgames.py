@@ -72,3 +72,31 @@ def test_wrap_and_image_shapes():
 def test_survey():
     df = og.survey([".07", ".77"], 300)
     assert df.loc[".77", "period"] == 12
+
+
+def test_threads_parallel_equal_sequential():
+    """Several games computed in parallel threads give the sequential results."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    codes = [".007", ".6", ".77", ".07", "grundy", "couples", ".137", ".164"]
+    seq = {c: og.compute(c, 3000, progress=False).values.copy() for c in codes}
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        par = dict(zip(codes, ex.map(lambda c: og.compute(c, 3000, progress=False, chunk_seconds=0.001).values, codes)))
+    for c in codes:
+        assert np.array_equal(seq[c], par[c]), c
+
+
+def test_threads_give_speedup():
+    """Without a global lock, threads overlap: 4 games in 4 threads take well under 4x one game."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    n = 40000
+    t = time.perf_counter()
+    og.compute(".6", n, progress=False)
+    one = time.perf_counter() - t
+    t = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        list(ex.map(lambda c: og.compute(c, n, progress=False), [".6", ".007", ".07", ".137"]))
+    four = time.perf_counter() - t
+    assert four < 2.5 * one, (one, four)

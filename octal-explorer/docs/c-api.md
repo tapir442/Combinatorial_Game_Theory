@@ -15,9 +15,11 @@ package does).
 
 - Nim-values are `uint16_t`.  Values above 65535 are an error.
 - Return codes: `0` success, `-1` the game code does not parse, `-2` a value exceeds
-  65535.
-- **Not thread-safe.**  The functions share a global scratch table.  Serialise calls, or
-  use separate processes.
+  65535, `-3` out of memory.  The library never exits the process.
+- **Thread-safe and reentrant.**  There is no global state: every `octal_extend` call
+  allocates its own scratch table and frees it before returning.  Calls can run at the
+  same time in different threads, as long as they write to different arrays `G`.
+  `make test-threads` checks this under ThreadSanitizer.
 - No function keeps a pointer to caller memory after it returns.
 
 ## Functions
@@ -54,7 +56,7 @@ for (long a = 0; a < N; a += 10000) {
 }
 ```
 
-On −2, `G` is valid up to the heap size where the overflow happened.
+On −2 or −3, `G` is valid up to the heap size where the computation stopped.
 
 ### `octal_period`
 

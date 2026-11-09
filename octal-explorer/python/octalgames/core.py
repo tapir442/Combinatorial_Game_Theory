@@ -97,14 +97,14 @@ class NimSequence:
     Period(preperiod=71, period=12, proven=True)
     """
 
-    def __init__(self, code: str, n: int = 0, *, progress: bool = True):
+    def __init__(self, code: str, n: int = 0, *, progress: bool = True, chunk_seconds: float = 0.3):
         self.code = code
         self.name = _lib.rule_name(code)
         self._G = np.zeros(0, dtype=np.uint16)
         self.seconds = 0.0
         self._period_cache = None
         if n:
-            self.extend(n, progress=progress)
+            self.extend(n, progress=progress, chunk_seconds=chunk_seconds)
 
     # ---- data access
     @property

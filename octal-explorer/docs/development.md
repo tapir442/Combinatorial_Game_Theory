@@ -23,9 +23,11 @@ octal-explorer/
 ## Tests
 
 ```sh
-make test          # C: sparse vs brute on 5 games, Kayles and Dawson's Kayles periods
+make test          # C: sparse vs brute on 5 games, Kayles and Dawson's Kayles periods,
+                   # and test-threads (8 threads under ThreadSanitizer vs sequential)
 uv run pytest      # Python: C backend vs a pure-Python reference on 7 codes,
-                   # periods, extend == one shot, Grundy's game, wrap/image, survey
+                   # periods, extend == one shot, Grundy's game, wrap/image, survey,
+                   # threads (same results, real parallel speed-up), doc examples
 ```
 
 The pure-Python reference in `tests/test_octalgames.py` (`brute`) is the independent

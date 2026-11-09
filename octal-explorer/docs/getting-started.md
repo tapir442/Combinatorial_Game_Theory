@@ -11,7 +11,7 @@
 cd octal-explorer
 make                         # ./octal and python/octalgames/liboctal.so
 uv sync --extra jupyter      # .venv with numpy, matplotlib, pillow, ipywidgets, pandas, JupyterLab
-uv run pytest                # 17 tests (including the docstring examples)
+uv run pytest                # 19 tests (including threads and the docstring examples)
 ```
 
 `make venv`, `make pytest` and `make lab` are shortcuts for the same steps.

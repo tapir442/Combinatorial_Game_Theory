@@ -22,10 +22,13 @@
  *
  * - Nim-values are stored as uint16_t.  Values above 65535 are reported as
  *   errors.
- * - The functions use a global scratch table, so they are **not thread-safe**.
- *   Serialise calls (the Python package holds a lock).
+ * - **Thread-safe and reentrant.**  The functions keep no global state: each
+ *   octal_extend() call allocates its own scratch memory and frees it before
+ *   returning.  Calls may run concurrently in different threads, as long as
+ *   they do not write to the same array G.
+ * - The library never exits the process; errors are reported as return codes.
  * - Return codes: 0 = success, -1 = the code does not parse, -2 = a value
- *   exceeds 65535.
+ *   exceeds 65535, -3 = out of memory.
  */
 #ifndef OCTAL_H
 #define OCTAL_H
@@ -58,7 +61,8 @@ int octal_rule_name(const char *code, char *name, int len);
  * @param G     array of at least @p to entries; G[0..from) must be valid
  * @param from  first heap size to compute (0 to start from scratch)
  * @param to    one past the last heap size to compute
- * @return 0, -1 (bad code) or -2 (value > 65535; G is filled up to that point)
+ * @return 0, -1 (bad code), -2 (value > 65535) or -3 (out of memory).
+ *         On -2 and -3, G is valid up to the heap size where it stopped.
  */
 int octal_extend(const char *code, uint16_t *G, long from, long to);
 

@@ -94,7 +94,8 @@ typedef struct {
     int found, proven;   /**< found: a period was detected; proven: certified by the theorem */
 } Period;
 
-/** Suppress progress and summary output (`-q`). */
+/** Suppress progress and summary output (`-q`).  Command-line program only; set
+ *  once before any computation and never written by the library functions. */
 static int quiet = 0;
 
 /** Print "octal: msg" to stderr and exit with status 1. */
@@ -190,24 +191,40 @@ static int parse_rule(const char *s, Rule *R) {
 /* ------------------------------------------------------ Grundy computation */
 
 /**
- * Stamp table for the mex: seen[v] == n means "v is the value of an option of
- * heap size n".  Using n as the stamp avoids clearing the table for every n;
- * it is reset (memset to 0xFF, which never equals a valid n) at the start of
- * each computation.  Global, hence the library is not thread-safe.
+ * @brief Scratch memory of one computation: the stamp table for the mex.
+ *
+ * seen[v] == n means "v is the value of an option of heap size n".  Using n as
+ * the stamp avoids clearing the table for every n; new entries are 0xFFFFFFFF,
+ * which never equals a valid n.  Every computation owns its own Scratch, so
+ * computations in different threads never share memory (the library is
+ * reentrant and thread-safe).
  */
-static uint32_t *seen;
-/** Number of entries allocated in #seen. */
-static size_t seen_cap;
+typedef struct {
+    uint32_t *seen;      /**< stamp table, indexed by nim-value */
+    size_t cap;          /**< number of entries allocated */
+} Scratch;
 
-/** Grow #seen to at least @p need entries (power of two); new entries are unmarked. */
-static void ensure_seen(size_t need) {
-    if (need <= seen_cap) return;
-    size_t c = seen_cap ? seen_cap : 1024;
+/**
+ * @brief Grow @p S to at least @p need entries (a power of two); new entries are unmarked.
+ * @return 0, or -1 if memory is exhausted (S is then unchanged and still valid)
+ */
+static int scratch_reserve(Scratch *S, size_t need) {
+    if (need <= S->cap) return 0;
+    size_t c = S->cap ? S->cap : 1024;
     while (c < need) c *= 2;
-    seen = realloc(seen, c * sizeof *seen);
-    if (!seen) die("out of memory");
-    memset(seen + seen_cap, 0xff, (c - seen_cap) * sizeof *seen);
-    seen_cap = c;
+    uint32_t *p = realloc(S->seen, c * sizeof *p);
+    if (!p) return -1;
+    memset(p + S->cap, 0xff, (c - S->cap) * sizeof *p);
+    S->seen = p;
+    S->cap = c;
+    return 0;
+}
+
+/** Release the memory of @p S and reset it to empty. */
+static void scratch_free(Scratch *S) {
+    free(S->seen);
+    S->seen = NULL;
+    S->cap = 0;
 }
 
 /** Sparse mode: value @p v is "rare" iff popcount(v & mask) is odd.
@@ -218,20 +235,21 @@ static inline int is_rare(unsigned v, unsigned mask) {
 
 /**
  * @brief Minimal excludant from @p start: the smallest value v >= start that is
- *        not marked with stamp @p st (seen[v] != st).
+ *        not marked with stamp @p st (S->seen[v] != st).
  *
  * The caller must have marked all options of the current heap with @p st
- * beforehand.  The result is bounded by the size of #seen (see ensure_seen()).
+ * beforehand.  The result is bounded by the size of the table (see
+ * scratch_reserve()).
  */
-static inline unsigned mex_from(unsigned start, uint32_t st) {
+static inline unsigned mex_from(const Scratch *S, unsigned start, uint32_t st) {
     unsigned v = start;
-    while (seen[v] == st) v++;
+    while (S->seen[v] == st) v++;
     return v;
 }
 
-/** Minimal excludant: the smallest value not marked with stamp @p st. */
-static inline unsigned mex(uint32_t st) {
-    return mex_from(0, st);
+/** Minimal excludant: the smallest value not marked with stamp @p st in @p S. */
+static inline unsigned mex(const Scratch *S, uint32_t st) {
+    return mex_from(S, 0, st);
 }
 
 /**
@@ -240,12 +258,14 @@ static inline unsigned mex(uint32_t st) {
  * Two-heap options are marked by the callers (brute force or sparse).
  * Three-heap splits a <= b <= c are enumerated directly: O(n^2) per call.
  *
+ * @param S   scratch (stamp table)
  * @param R   rule
  * @param G   nim-values of all heap sizes < n
  * @param n   heap size
- * @param st  stamp to write into #seen (normally n)
+ * @param st  stamp to write into S->seen (normally n)
  */
-static void mark_simple(const Rule *R, const uint16_t *G, long n, uint32_t st) {
+static void mark_simple(Scratch *S, const Rule *R, const uint16_t *G, long n, uint32_t st) {
+    uint32_t *seen = S->seen;
     int tmax = R->t < n ? R->t : (int)n;
     for (int k = 0; k <= tmax; k++) {
         unsigned d = R->d[k];
@@ -274,15 +294,17 @@ static inline int pair_allowed(const Rule *R, long n, long a, long b) {
  * Marks every option (all two-heap splits a + b = n - k with 1 <= a <= b, plus
  * mark_simple()) and returns their mex.  O(n) for octal codes.
  *
+ * @param S      scratch; must have room for every XOR of values in G
  * @param R      rule
  * @param G      nim-values of all heap sizes < n
  * @param n      heap size
  * @param pairs  incremented by the number of two-heap splits examined
  * @return G(n)
  */
-static unsigned grundy_brute(const Rule *R, const uint16_t *G, long n, long long *pairs) {
+static unsigned grundy_brute(Scratch *S, const Rule *R, const uint16_t *G, long n, long long *pairs) {
+    uint32_t *seen = S->seen;
     uint32_t st = (uint32_t)n;
-    mark_simple(R, G, n, st);
+    mark_simple(S, R, G, n, st);
     int tmax = R->t < n ? R->t : (int)n;
     for (int k = 0; k <= tmax; k++) {
         if (!(R->d[k] & 4)) continue;
@@ -295,7 +317,7 @@ static unsigned grundy_brute(const Rule *R, const uint16_t *G, long n, long long
         }
         *pairs += m / 2;
     }
-    return mex(st);
+    return mex(S, st);
 }
 
 /**
@@ -309,6 +331,7 @@ static unsigned grundy_brute(const Rule *R, const uint16_t *G, long n, long long
  * Gives the same result as grundy_brute() (checked by `--check`), but is not
  * faster on games whose nim-values are mostly common.
  *
+ * @param S      scratch; must have room for every XOR of values in G
  * @param R      rule
  * @param G      nim-values of all heap sizes < n
  * @param n      heap size
@@ -318,10 +341,11 @@ static unsigned grundy_brute(const Rule *R, const uint16_t *G, long n, long long
  * @param pairs  incremented by the number of pairs scanned in step 2
  * @return G(n)
  */
-static unsigned grundy_sparse(const Rule *R, const uint16_t *G, long n, unsigned mask,
+static unsigned grundy_sparse(Scratch *S, const Rule *R, const uint16_t *G, long n, unsigned mask,
                               const long *rare, long nrare, long long *pairs) {
+    uint32_t *seen = S->seen;
     uint32_t st = (uint32_t)n;
-    mark_simple(R, G, n, st);
+    mark_simple(S, R, G, n, st);
     int tmax = R->t < n ? R->t : (int)n;
     /* every rare reachable value involves exactly one rare heap */
     for (int k = 0; k <= tmax; k++) {
@@ -334,7 +358,7 @@ static unsigned grundy_sparse(const Rule *R, const uint16_t *G, long n, unsigned
             seen[G[a] ^ G[b]] = st;
         }
     }
-    unsigned lo = mex(st);
+    unsigned lo = mex(S, st);
     if (is_rare(lo, mask)) return lo;
     /* confirm common values by scanning pairs; stop once the gap is rare */
     for (int k = 0; k <= tmax; k++) {
@@ -348,7 +372,7 @@ static unsigned grundy_sparse(const Rule *R, const uint16_t *G, long n, unsigned
             seen[x] = st;
             (*pairs)++;
             if (x == lo) {
-                lo = mex_from(lo, st);
+                lo = mex_from(S, lo, st);
                 if (is_rare(lo, mask)) return lo;
             }
         }
@@ -389,7 +413,8 @@ static unsigned choose_mask(const uint16_t *G, long n, unsigned vcap, long *rare
  * Uses grundy_brute(), or grundy_sparse() when @p allow_sparse is set and a
  * mask makes fewer than 25% of heap sizes rare.  The mask is re-chosen at
  * n = 2048, 8192, 32768, ...  Shows progress on stderr when it is a terminal.
- * Dies if a value exceeds 65535.
+ * Dies if a value exceeds 65535 or memory runs out (command-line use only; the
+ * library uses octal_extend(), which returns error codes instead).
  *
  * @param R             rule
  * @param N             number of heap sizes
@@ -402,8 +427,8 @@ static Result compute(const Rule *R, long N, int allow_sparse) {
     res.G = xcalloc((size_t)N, sizeof *res.G);
     uint16_t *G = res.G;
     unsigned maxG = 0, vcap = 2;
-    ensure_seen(2 * vcap + 2);
-    memset(seen, 0xff, seen_cap * sizeof *seen); /* stamps from earlier runs */
+    Scratch S = {0};
+    if (scratch_reserve(&S, 2 * vcap + 2)) die("out of memory");
     long *rare = NULL, nrare = 0, rare_cap = 0;
     int sparse = 0;
     unsigned mask = 0;
@@ -412,14 +437,14 @@ static Result compute(const Rule *R, long N, int allow_sparse) {
     int show = !quiet && isatty(2);
 
     for (long n = 0; n < N; n++) {
-        unsigned g = sparse ? grundy_sparse(R, G, n, mask, rare, nrare, &res.pairs)
-                            : grundy_brute(R, G, n, &res.pairs);
+        unsigned g = sparse ? grundy_sparse(&S, R, G, n, mask, rare, nrare, &res.pairs)
+                            : grundy_brute(&S, R, G, n, &res.pairs);
         if (g > 65535) die("nim-value exceeds 65535; not supported");
         G[n] = (uint16_t)g;
         if (g > maxG) {
             maxG = g;
             while (vcap <= maxG) vcap *= 2;
-            ensure_seen(2 * (size_t)vcap + 2);
+            if (scratch_reserve(&S, 2 * (size_t)vcap + 2)) die("out of memory");
         }
         if (sparse && is_rare(g, mask)) {
             if (nrare == rare_cap) {
@@ -471,6 +496,7 @@ static Result compute(const Rule *R, long N, int allow_sparse) {
     res.mask = mask;
     res.nrare = sparse ? nrare : 0;
     free(rare);
+    scratch_free(&S);
     return res;
 }
 
@@ -982,8 +1008,9 @@ int octal_rule_name(const char *code, char *name, int len) {
 
 /**
  * See octal.h.  Fill G[from..to) given G[0..from) with grundy_brute().
- * Resets the stamp table, so stale stamps from earlier calls cannot match.
- * Not thread-safe.  Returns 0, -1 (bad code) or -2 (value > 65535).
+ * Uses its own Scratch, freed before returning, so it is reentrant: calls in
+ * different threads may run at the same time (on different arrays G).
+ * Returns 0, -1 (bad code), -2 (value > 65535) or -3 (out of memory).
  */
 int octal_extend(const char *code, uint16_t *G, long from, long to) {
     Rule R;
@@ -992,20 +1019,22 @@ int octal_extend(const char *code, uint16_t *G, long from, long to) {
     for (long i = 0; i < from; i++)
         if (G[i] > maxG) maxG = G[i];
     while (vcap <= maxG) vcap *= 2;
-    ensure_seen(2 * (size_t)vcap + 2);
-    memset(seen, 0xff, seen_cap * sizeof *seen);
+    Scratch S = {0};
+    int rc = 0;
+    if (scratch_reserve(&S, 2 * (size_t)vcap + 2)) return -3;
     long long pairs = 0;
     for (long n = from; n < to; n++) {
-        unsigned g = grundy_brute(&R, G, n, &pairs);
-        if (g > 65535) return -2;
+        unsigned g = grundy_brute(&S, &R, G, n, &pairs);
+        if (g > 65535) { rc = -2; break; }
         G[n] = (uint16_t)g;
         if (g > maxG) {
             maxG = g;
             while (vcap <= maxG) vcap *= 2;
-            ensure_seen(2 * (size_t)vcap + 2);
+            if (scratch_reserve(&S, 2 * (size_t)vcap + 2)) { rc = -3; break; }
         }
     }
-    return 0;
+    scratch_free(&S);
+    return rc;
 }
 
 /** See octal.h.  Wraps find_period(): returns 0 none, 1 apparent, 2 proved
@@ -1077,7 +1106,6 @@ int main(int argc, char **argv) {
     Result res = compute(&R, N, sparse || check);
 
     if (check) {
-        seen_cap = 0; free(seen); seen = NULL;
         Result b = compute(&R, N, 0);
         for (long n = 0; n < N; n++)
             if (b.G[n] != res.G[n]) {
@@ -1175,7 +1203,7 @@ int main(int argc, char **argv) {
     fclose(s);
     if (!quiet) printf("output          %s/index.html\n", dir);
 
-    free(ac); free(cnt); free(recn); free(recv); free(res.G); free(seen);
+    free(ac); free(cnt); free(recn); free(recv); free(res.G);
     return 0;
 }
 #endif /* OCTAL_NO_MAIN */

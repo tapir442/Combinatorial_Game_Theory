@@ -22,16 +22,22 @@ non-moves.
 
 The nim-value of `n` is the smallest value not marked by any option.  Instead of
 clearing a boolean array for every `n`, the code uses a **stamp table**:
-`seen[v] == n` means "v is an option of n".  It is reset (`memset` to 0xFF) only at the
-start of each computation, which is why the library is not thread-safe.
+`seen[v] == n` means "v is an option of n".  New entries are 0xFFFFFFFF, which never
+equals a valid `n`.
+
+The table lives in a `Scratch` struct (`seen`, `cap`) that belongs to a single
+computation.  `compute` and `octal_extend` create it, grow it with `scratch_reserve`
+(which returns −1 on out-of-memory instead of exiting), and release it with
+`scratch_free`.  The kernel functions take a `Scratch *`.  There are no mutable globals
+apart from the command-line flag `quiet`, so the library is thread-safe.
 
 - `mark_simple` marks 0-heap, 1-heap and 3-heap options.  Three-heap moves enumerate
   `a ≤ b ≤ c`.
 - `grundy_brute` additionally marks every two-heap split `a + b = n − k` with
   `1 ≤ a ≤ b`, skipping `a == b` for Grundy's game and `n == 2` for Couples.  It then
-  returns `mex(st)`.
-- `mex(st)` and `mex_from(start, st)` return the smallest value (≥ `start`) not marked
-  with stamp `st`.  The sparse mode uses `mex_from` to resume from its current lower
+  returns `mex(S, st)`.
+- `mex(S, st)` and `mex_from(S, start, st)` return the smallest value (≥ `start`) not
+  marked with stamp `st` in `S`.  The sparse mode uses `mex_from` to resume from its current lower
   bound.
 - The size of `seen` grows as values grow (`ensure_seen`).  The table stays twice the
   smallest power of two above the largest value, so every XOR of values fits.
