@@ -127,10 +127,10 @@ def test_plot_folded_kinds():
 
 def test_arithmetic_periodicity_hexadecimal():
     # Nowakowski, Problem A3: .28 = .29 period 53 saltus 16 (only G(0) exceptional),
-    # .9c period 36, preperiod 28, saltus 16.  Arithmetic periods are never "proved".
+    # .9c period 36, preperiod 28, saltus 16.  All three satisfy Austin's Theorem 6.8.
     for code, exp in ((".28", (1, 53, 16)), (".29", (1, 53, 16)), (".9c", (28, 36, 16))):
         p = og.compute(code, 1500, progress=False).period
-        assert (p.preperiod, p.period, p.saltus, p.proven) == (*exp, False), (code, p)
+        assert (p.preperiod, p.period, p.saltus, p.proven, p.proof) == (*exp, True, "Austin 6.8"), (code, p)
     s = og.compute(".28", 1500, progress=False)
     img = s.image(53, "diff")                      # saltus taken from the detected period
     dark = np.argwhere((img == (150, 20, 30)).all(axis=2))
@@ -138,8 +138,24 @@ def test_arithmetic_periodicity_hexadecimal():
 
 
 def test_ordinary_periods_unchanged_and_f6_breaks():
-    assert og.compute(".77", 300, progress=False).period == og.Period(71, 12, True, 0)
+    p = og.compute(".77", 300, progress=False).period
+    assert (p.preperiod, p.period, p.saltus, p.proven, p.proof) == (71, 12, 0, True, "periodicity theorem")
     # .f6 looks like period 43, saltus 32 from 604 up to n ~ 1900, but not beyond
     p = og.compute(".f6", 1900, progress=False).period
     assert (p.preperiod, p.period, p.saltus) == (604, 43, 32)
     assert og.compute(".f6", 2500, progress=False).period is None
+
+
+def test_austin_theorem_examples():
+    """Austin's thesis (1976), Ch. 6: .B8 has last irregular value G(8) = 3, period 7,
+    saltus 4, and needs 8 + 8*7 + 2 - 1 = 65 values; .F8 has period 6, saltus 4."""
+    p = og.compute(".b8", 200, progress=False).period
+    assert (p.preperiod, p.period, p.saltus, p.proof) == (9, 7, 4, "Austin 6.8")
+    assert og.compute(".b8", 66, progress=False).period.proven          # exactly enough data
+    q = og.compute(".b8", 65, progress=False).period
+    assert q is None or not q.proven                                     # one value short
+    p = og.compute(".f8", 200, progress=False).period
+    assert (p.period, p.saltus, p.proven) == (6, 4, True)
+    # saltus not a power of 2 -> Austin's theorem cannot apply: .3F is 012012(+3) (Kenyon)
+    p = og.compute(".3f", 2000, progress=False).period
+    assert (p.period, p.saltus, p.proven) == (6, 3, False)

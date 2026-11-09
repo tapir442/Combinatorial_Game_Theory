@@ -28,7 +28,8 @@ s = og.NimSequence.from_csv(".007", "treblecross.csv").extend(1_000_000)
 s.values          # read-only numpy uint16 array
 s[1000:1010]      # slicing works like an array
 len(s), s.max_value
-s.period          # Period(preperiod, period, proven, saltus) or None; saltus > 0 = arithmetic
+s.period          # Period(preperiod, period, proven, saltus, proof) or None; saltus > 0 = arithmetic
+                  # proof: 'periodicity theorem', 'Austin 6.8' or None; s.period.proof_period / .proof_saltus
 s.records()       # [(n, value), ...] where a new maximum first appears
 s.counts()        # counts[v]
 s.first_occurrence()

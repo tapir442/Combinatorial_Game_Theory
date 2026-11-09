@@ -93,6 +93,9 @@ typedef struct {
     long pre, per;       /**< preperiod i and period p: G(n+p) = G(n) + saltus for n >= i */
     int found, proven;   /**< found: a period was detected; proven: certified by the theorem */
     long saltus;         /**< saltus s (0 = ordinary periodicity) */
+    int proof;           /**< 0 none, 1 octal periodicity theorem, 2 Austin's Theorem 6.8 */
+    long proof_per;      /**< period that the proof certifies (a multiple of per for Austin) */
+    long proof_saltus;   /**< saltus that the proof certifies */
 } Period;
 
 /** Suppress progress and summary output (`-q`).  Command-line program only; set
@@ -517,15 +520,17 @@ static Result compute(const Rule *R, long N, int allow_sparse) {
  * periodic from i on.  So p is *proved* once N >= 2i + 2p + t; this is only
  * claimed for plain octal codes (no d0, no hex digits, no named rules).
  *
- * Arithmetic periods (s > 0) are never reported as proved: verifying them
- * needs Austin's theorem or its generalisation by Howse and Nowakowski, which
- * is not implemented.
+ * Arithmetic periods (s > 0) are proved with Austin's Theorem 6.8 when its
+ * hypotheses hold (see austin_check()), possibly for a multiple of the
+ * period and saltus; otherwise they stay apparent.
  *
  * Returns the first proved period; otherwise the smallest p with N - i >= 3p
  * (and, for s > 0, also N - i >= N/4) as an *apparent* period (multiples of it
  * are skipped, keeping the search linear for periodic data); otherwise
  * found = 0.
  */
+static void austin_prove(const uint16_t *G, long N, const Rule *R, Period *P);
+
 static Period find_period(const uint16_t *G, long N, const Rule *R, int allow_saltus) {
     int can_prove = R->special == SP_NONE && R->d[0] == 0 && !R->hex;
     Period ap = {0};
@@ -537,7 +542,7 @@ static Period find_period(const uint16_t *G, long N, const Rule *R, int allow_sa
         while (n >= 0 && (long)G[n + p] - (long)G[n] == s) n--;
         long i = n + 1;
         if (s == 0 && can_prove && (long long)N >= 2LL * i + 2LL * p + R->t) {
-            Period r = {i, p, 1, 1, 0};
+            Period r = {i, p, 1, 1, 0, 1, p, 0};
             return r;
         }
         /* apparent: at least 3 periods; with a saltus also at least N/4 values,
@@ -548,7 +553,77 @@ static Period find_period(const uint16_t *G, long N, const Rule *R, int allow_sa
             ap.pre = i; ap.per = p; ap.found = 1; ap.saltus = s;
         }
     }
+    if (ap.found && ap.saltus > 0) austin_prove(G, N, R, &ap);
     return ap;
+}
+
+/**
+ * @brief Check the hypotheses of Austin's Theorem 6.8 for given e, p, s.
+ *
+ * R. B. Austin, *Impartial and partisan games*, MSc thesis, University of
+ * Calgary, 1976, Theorem 6.8 (p. 122): let d0.d1...dt (t >= 1) be a hexadecimal
+ * code (digits <= 15, so a move leaves at most three heaps), e the last
+ * irregular index, p >= t+2 and s = 2^k >= 1.  If
+ *   (1) G(i+p) = G(i) + s for all e < i < e+7p+t,
+ *   (2) G(i) < s for all i <= e,
+ *   (3) G(i) < 2s for all i <= e+p,
+ *   (4) either some d_{2v+1} and some d_{2w} both contain 8 and every g with
+ *       0 <= g < 2s equals G(i) for some i > 0, or some d_u contains 8 and
+ *       every g with 0 <= g < 2s equals G(2v+1) = G(2w) for some odd heap
+ *       2v+1 and even heap 2w >= 0,
+ * then G(i+p) = G(i) + s for all i > e.  ("d contains 8": 8 occurs in the
+ * binary expansion of d, i.e. a move may leave three heaps.)
+ *
+ * @return 1 if all hypotheses hold within G[0..N), else 0
+ */
+static int austin_check(const uint16_t *G, long N, const Rule *R, long e, long p, long s) {
+    int t = R->t < 1 ? 1 : R->t;
+    if (s < 1 || (s & (s - 1)) || p < t + 2) return 0;
+    if ((long long)e + 8LL * p + t > N) return 0;         /* (1) needs G up to e+8p+t-1 */
+    for (long i = e + 1; i < e + 7 * p + t; i++)           /* (1) */
+        if ((long)G[i + p] - (long)G[i] != s) return 0;
+    for (long i = 0; i <= e; i++)                          /* (2) */
+        if (G[i] >= s) return 0;
+    for (long i = 0; i <= e + p; i++)                      /* (3) */
+        if (G[i] >= 2 * s) return 0;
+    int odd8 = 0, even8 = 0;                               /* (4) */
+    for (int u = 0; u <= R->t; u++)
+        if (R->d[u] & 8) { if (u & 1) odd8 = 1; else even8 = 1; }
+    if (!odd8 && !even8) return 0;
+    unsigned char *f = xcalloc((size_t)(2 * s), 1);        /* bit 1: some i > 0, 2: odd, 4: even */
+    for (long i = 0; i < N; i++)
+        if (G[i] < 2 * s) f[G[i]] |= (unsigned char)((i > 0 ? 1 : 0) | (i & 1 ? 2 : 4));
+    int a = odd8 && even8, b = 1;
+    for (long g = 0; g < 2 * s; g++) {
+        if (!(f[g] & 1)) a = 0;
+        if ((f[g] & 6) != 6) b = 0;
+    }
+    free(f);
+    return a || b;
+}
+
+/**
+ * @brief Try to prove an apparent arithmetic period with Austin's Theorem 6.8.
+ *
+ * The theorem's hypotheses (s a power of 2, p >= t+2, conditions (2) and (3))
+ * may only hold for a multiple m*p, m*s of the least period and saltus, as
+ * Austin notes for .F8 (period 6, saltus 4, proved with 12 and 8).  So
+ * m = 1, 2, ... are tried while the data suffice.  On success P->proven is
+ * set and P->proof_per / P->proof_saltus hold the certified multiple.
+ * Only plain take-and-break codes qualify (no named rules).
+ */
+static void austin_prove(const uint16_t *G, long N, const Rule *R, Period *P) {
+    if (R->special != SP_NONE || !P->found || P->saltus < 1) return;
+    long e = P->pre - 1;
+    int t = R->t < 1 ? 1 : R->t;
+    for (long m = 1; (long long)e + 8LL * m * P->per + t <= N; m++)
+        if (austin_check(G, N, R, e, m * P->per, m * P->saltus)) {
+            P->proven = 1;
+            P->proof = 2;
+            P->proof_per = m * P->per;
+            P->proof_saltus = m * P->saltus;
+            return;
+        }
 }
 
 /* -------------------------------------------------------------- graphics */
@@ -898,7 +973,11 @@ static void write_html(const char *dir, const Rule *R, const Result *res, const 
     if (!f) { perror(path); exit(1); }
     long M = res->N < embed ? res->N : embed;
     char per[256];
-    if (P->found && P->saltus)
+    if (P->found && P->saltus && P->proven)
+        snprintf(per, sizeof per, "Proved (Austin's Theorem 6.8, with period %ld and saltus %ld): "
+                 "arithmetic period %ld, saltus %ld, preperiod %ld: G(n+%ld) = G(n) + %ld",
+                 P->proof_per, P->proof_saltus, P->per, P->saltus, P->pre, P->per, P->saltus);
+    else if (P->found && P->saltus)
         snprintf(per, sizeof per, "Apparent (unproved) arithmetic period %ld, saltus %ld, preperiod %ld: "
                  "G(n+%ld) = G(n) + %ld", P->per, P->saltus, P->pre, P->per, P->saltus);
     else if (P->found)
@@ -1071,8 +1150,11 @@ int octal_period(const char *code, const uint16_t *G, long N, long *out) {
     return P.found ? (P.proven ? 2 : 1) : 0;
 }
 
-/** See octal.h.  Like octal_period() but also detects arithmetic periodicity:
- *  out[0] = preperiod, out[1] = period, out[2] = saltus. */
+/** See octal.h.  Like octal_period() but also detects arithmetic periodicity
+ *  and proves it with Austin's Theorem 6.8 where possible.  out[0] = preperiod,
+ *  out[1] = period, out[2] = saltus, out[3] / out[4] = period / saltus that
+ *  the proof certifies.  Returns 0 none, 1 apparent, 2 proved by the octal
+ *  periodicity theorem, 3 proved by Austin's Theorem 6.8, -1 bad code. */
 int octal_period_ex(const char *code, const uint16_t *G, long N, long *out) {
     Rule R;
     if (parse_rule(code, &R)) return -1;
@@ -1080,7 +1162,9 @@ int octal_period_ex(const char *code, const uint16_t *G, long N, long *out) {
     out[0] = P.pre;
     out[1] = P.per;
     out[2] = P.saltus;
-    return P.found ? (P.proven ? 2 : 1) : 0;
+    out[3] = P.proven ? P.proof_per : 0;
+    out[4] = P.proven ? P.proof_saltus : 0;
+    return P.found ? (P.proven ? 1 + P.proof : 1) : 0;
 }
 
 #ifndef OCTAL_NO_MAIN
@@ -1219,7 +1303,11 @@ int main(int argc, char **argv) {
             fprintf(g, "rare mask       0x%x, %ld rare heap sizes (%.3f%%)\n", res.mask, res.nrare,
                     100.0 * res.nrare / N);
         fprintf(g, "max value       %u at n = %ld\n", maxG, maxat);
-        if (P.found && P.saltus)
+        if (P.found && P.saltus && P.proven)
+            fprintf(g, "period          %ld, saltus %ld, preperiod %ld (arithmetic; PROVED by Austin's "
+                    "Theorem 6.8 with period %ld, saltus %ld)\n",
+                    P.per, P.saltus, P.pre, P.proof_per, P.proof_saltus);
+        else if (P.found && P.saltus)
             fprintf(g, "period          %ld, saltus %ld, preperiod %ld (arithmetic; apparent only, not proved)\n",
                     P.per, P.saltus, P.pre);
         else if (P.found)

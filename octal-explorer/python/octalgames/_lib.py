@@ -90,9 +90,13 @@ def extend(code: str, values: np.ndarray, start: int, stop: int) -> None:
 
 
 def period(code: str, values: np.ndarray, n: int):
-    """(rc, preperiod, period, saltus); rc 0 none, 1 apparent, 2 proved."""
-    out = (ctypes.c_long * 3)()
+    """(rc, preperiod, period, saltus, proof_period, proof_saltus).
+
+    rc: 0 none, 1 apparent, 2 proved by the octal periodicity theorem,
+    3 proved by Austin's Theorem 6.8.
+    """
+    out = (ctypes.c_long * 5)()
     rc = load().octal_period_ex(code.encode(), values, n, out)
     if rc < 0:
         raise ValueError(f"cannot parse game code {code!r}")
-    return rc, out[0], out[1], out[2]
+    return rc, out[0], out[1], out[2], out[3], out[4]

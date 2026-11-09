@@ -84,17 +84,49 @@ Ordinary periodicity is \(s = 0\).  octal-explorer also looks for these.  For ea
 candidate \(p\) it takes \(s = G(N-1) - G(N-1-p)\) from the end of the data and finds
 the earliest \(i\) from which the relation holds.
 
-- Arithmetic periods are reported as **apparent**, never as proved.  Verifying them needs
-  Austin's theorem or its generalisation by Howse and Nowakowski, which is not
-  implemented.
+- Arithmetic periods are **proved** with Austin's Theorem 6.8 when its hypotheses hold
+  (see below), and otherwise reported as **apparent**.
 - To avoid chance matches, an arithmetic period must hold for at least three periods
   **and** at least a quarter of the computed values.
 
-| Game | Detected (n < 1500) |
+| Game | Result |
 |---|---|
-| `.28`, `.29` | period 53, saltus 16, preperiod 1 (matches Nowakowski, A3) |
-| `.9c` | period 36, saltus 16, preperiod 28 (matches A3) |
-| `.f6` | period 43, saltus 32, preperiod 604 up to n ≈ 1900; **none** from n ≈ 1930 |
+| `.28`, `.29` | period 53, saltus 16, preperiod 1, **proved** (Austin 6.8); matches Nowakowski, A3 |
+| `.9c` | period 36, saltus 16, preperiod 28, **proved**; matches A3 |
+| `.b8` | period 7, saltus 4, preperiod 9, **proved** from 66 values, Austin's own example |
+| `.f8` | period 6, saltus 4, preperiod 7, **proved** (Austin used 12/8, see below) |
+| `.3f` | period 6, saltus 3: apparent only, since 3 is not a power of 2 |
+| `.f6` | period 43, saltus 32, preperiod 604 up to n ≈ 1900, unproved; **none** from n ≈ 1930 |
+
+### Austin's Theorem 6.8
+
+R. B. Austin, *Impartial and partisan games*, MSc thesis, University of Calgary (1976),
+Theorem 6.8.  Let \(d_0.d_1\ldots d_t\) (\(t \ge 1\)) be a hexadecimal code, so a move leaves at
+most three heaps.  Let \(e\) be the last irregular index, \(p \ge t+2\) and \(s = 2^k \ge 1\).
+Suppose:
+
+1. \(G(i+p) = G(i) + s\) for all \(e < i < e + 7p + t\);
+2. \(G(i) < s\) for all \(i \le e\);
+3. \(G(i) < 2s\) for all \(i \le e + p\);
+4. either
+    - some odd-indexed digit \(d_{2v+1}\) and some even-indexed digit \(d_{2w}\) both
+      contain 8, and every \(g < 2s\) occurs as some \(G(i)\) with \(i > 0\); or
+    - some digit \(d_u\) contains 8, and every \(g < 2s\) occurs both as \(G\) of an odd
+      heap and as \(G\) of an even heap.
+
+  ("\(d\) contains 8" means 8 occurs in the binary expansion of \(d\): a move may leave
+  three heaps.)
+
+Then \(G(i+p) = G(i) + s\) for **all** \(i > e\).
+
+octal-explorer uses the smallest possible \(e\) (preperiod − 1).  Conditions 2–3, the
+power of 2 and \(p \ge t+2\) may hold only for a multiple \(mp, ms\), so \(m = 1, 2, \ldots\)
+are tried.  The certified multiple is reported as `proof_period` / `proof_saltus`.
+
+For `.F8` Austin writes that he had to use period 12 and saltus 8.  His sequence
+notation starts the period after \(G(9) = 4\), i.e. \(e = 9\), where condition 2 fails
+for \(s = 4\).  With the smallest \(e = 6\) all hypotheses already hold for period 6 and
+saltus 4.  The generalisation by Howse and Nowakowski (2004) is not implemented.
 
 In `diff` pictures, use the saltus: cells are dark where \(G(n) - G(n-W) \ne s\).  When
 the width is the detected period, the detected saltus is used automatically, so

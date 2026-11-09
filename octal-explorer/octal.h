@@ -89,19 +89,24 @@ int octal_extend(const char *code, uint16_t *G, long from, long to);
 int octal_period(const char *code, const uint16_t *G, long N, long *out);
 
 /**
- * @brief Like octal_period(), but also detects arithmetic periodicity.
+ * @brief Like octal_period(), but also detects and proves arithmetic periodicity.
  *
  * Looks for G(n+p) = G(n) + s for all n >= i, where s >= 0 is the saltus
  * (s = 0 is ordinary periodicity).  For each p, s is taken from the end of the
- * data, s = G(N-1) - G(N-1-p).  Arithmetic periods with s > 0 are only ever
- * reported as apparent (return 1): verifying them needs Austin's theorem or
- * its generalisation by Howse and Nowakowski, which is not implemented.
+ * data, s = G(N-1) - G(N-1-p).  An arithmetic period (s > 0) is proved with
+ * Austin's Theorem 6.8 (MSc thesis, Calgary 1976) when its hypotheses hold:
+ * s a power of 2, p >= t+2, small values before the period, enough 3-heap
+ * moves, and the relation checked for e < i < e+7p+t, e = i-1.  The hypotheses
+ * may only hold for a multiple m*p, m*s; out[3], out[4] give the certified
+ * values.
  *
  * @param code  game code
  * @param G     nim-values
  * @param N     number of values in @p G
- * @param out   out[0] = preperiod i, out[1] = period p, out[2] = saltus s
- * @return 0 = none found, 1 = apparent, 2 = proved (s = 0 only), -1 = bad code
+ * @param out   out[0] = preperiod i, out[1] = period p, out[2] = saltus s,
+ *              out[3] = certified period, out[4] = certified saltus (0 if unproved)
+ * @return 0 = none found, 1 = apparent, 2 = proved by the octal periodicity
+ *         theorem, 3 = proved by Austin's Theorem 6.8, -1 = bad code
  */
 int octal_period_ex(const char *code, const uint16_t *G, long N, long *out);
 

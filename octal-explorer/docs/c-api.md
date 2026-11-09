@@ -85,10 +85,27 @@ int octal_period_ex(const char *code, const uint16_t *G, long N, long *out);
 ```
 
 Like `octal_period`, but it also detects **arithmetic periodicity** \(G(n+p) = G(n) + s\)
-with saltus \(s \ge 0\).  It writes `out[0] = preperiod`, `out[1] = period` and
-`out[2] = saltus`, so `out` needs three entries.  Periods with \(s > 0\) are only ever
-reported as apparent (return 1).  See [Concepts](concepts.md#arithmetic-periodicity-saltus).
-The Python package and the command-line program use this function.
+with saltus \(s \ge 0\), and proves it with Austin's Theorem 6.8 where possible.  `out`
+needs **five** entries:
+
+| Entry | Meaning |
+|---|---|
+| `out[0]` | preperiod |
+| `out[1]` | least period |
+| `out[2]` | saltus (0 = ordinary periodicity) |
+| `out[3]` | period certified by the proof (a multiple of `out[1]` for Austin), 0 if unproved |
+| `out[4]` | saltus certified by the proof, 0 if unproved |
+
+| Return | Meaning |
+|---|---|
+| 3 | proved by Austin's Theorem 6.8 (arithmetic, hexadecimal codes) |
+| 2 | proved by the octal periodicity theorem |
+| 1 | apparent |
+| 0 | none found |
+| −1 | bad code |
+
+See [Concepts](concepts.md#austins-theorem-68).  The Python package and the command-line
+program use this function.
 
 ## Minimal example
 

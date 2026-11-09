@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import colorsys
+import dataclasses
 import html
 import sys
 import time
@@ -21,19 +22,33 @@ class Period:
     ``saltus`` s is 0 for ordinary periodicity and positive for *arithmetic*
     periodicity (typical of hexadecimal games).
 
-    ``proven`` is True when the octal periodicity theorem certifies the period
-    (G(n+p) = G(n) for i <= n < 2i + p + t, t = last code digit).  Otherwise the
-    period is only *apparent*: it holds for at least three periods at the end
-    of the computed range (and, if s > 0, for at least a quarter of the data).
-    Arithmetic periods are never reported as proved.
+    ``proven`` is True when a theorem certifies the period, named in ``proof``:
+
+    * ``'periodicity theorem'`` (octal periodicity theorem, s = 0):
+      G(n+p) = G(n) for i <= n < 2i + p + t, t = last code digit;
+    * ``'Austin 6.8'`` (Austin's Theorem 6.8, s > 0, hexadecimal codes).  Its
+      hypotheses may only hold for a multiple of the period and saltus; the
+      certified values are ``proof_period`` and ``proof_saltus``.
+
+    Otherwise the period is only *apparent*: it holds for at least three
+    periods at the end of the computed range (and, if s > 0, for at least a
+    quarter of the data).
     """
     preperiod: int
     period: int
     proven: bool
     saltus: int = 0
+    proof: Optional[str] = None
+    proof_period: Optional[int] = dataclasses.field(default=None, repr=False)
+    proof_saltus: Optional[int] = dataclasses.field(default=None, repr=False)
 
     def __str__(self) -> str:
-        kind = "proved" if self.proven else "apparent"
+        if self.proven and self.proof == "Austin 6.8":
+            kind = "proved by Austin's Theorem 6.8"
+            if (self.proof_period, self.proof_saltus) != (self.period, self.saltus):
+                kind += f" with period {self.proof_period}, saltus {self.proof_saltus}"
+        else:
+            kind = "proved" if self.proven else "apparent"
         if self.saltus:
             return (f"arithmetic period {self.period}, saltus {self.saltus}, "
                     f"preperiod {self.preperiod} ({kind})")
@@ -102,7 +117,7 @@ class NimSequence:
 
     >>> s = NimSequence(".77", 200)       # Kayles
     >>> s.period
-    Period(preperiod=71, period=12, proven=True, saltus=0)
+    Period(preperiod=71, period=12, proven=True, saltus=0, proof='periodicity theorem')
     """
 
     def __init__(self, code: str, n: int = 0, *, progress: bool = True, chunk_seconds: float = 0.3):
@@ -192,8 +207,11 @@ class NimSequence:
     def period(self) -> Optional[Period]:
         """Eventual period (proved or apparent, possibly arithmetic), or None."""
         if self._period_cache is None:
-            rc, pre, per, sal = _lib.period(self.code, self._G, len(self._G))
-            self._period_cache = (Period(pre, per, rc == 2, sal),) if rc else (None,)
+            rc, pre, per, sal, ppro, spro = _lib.period(self.code, self._G, len(self._G))
+            proof = {2: "periodicity theorem", 3: "Austin 6.8"}.get(rc)
+            self._period_cache = ((Period(pre, per, rc >= 2, sal, proof,
+                                          ppro if rc >= 2 else None, spro if rc >= 2 else None),)
+                                  if rc else (None,))
         return self._period_cache[0]
 
     def records(self):
@@ -408,6 +426,7 @@ class NimSequence:
             "code": self.code, "name": self.name, "n": len(self),
             "period": p.period if p else None, "preperiod": p.preperiod if p else None,
             "proven": p.proven if p else False, "saltus": p.saltus if p else None,
+            "proof": p.proof if p else None,
             "max_value": mx,
             "max_at": int(np.argmax(self._G)) if len(self) else None,
             "p_positions": int(np.count_nonzero(self._G == 0)),
@@ -459,7 +478,7 @@ def compute(code: str, n: int, **kw) -> NimSequence:
     --------
     >>> import octalgames as og
     >>> og.compute(".77", 300).period          # Kayles
-    Period(preperiod=71, period=12, proven=True, saltus=0)
+    Period(preperiod=71, period=12, proven=True, saltus=0, proof='periodicity theorem')
     """
     return NimSequence(code, n, **kw)
 

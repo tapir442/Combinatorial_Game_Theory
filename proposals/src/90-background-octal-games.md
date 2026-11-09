@@ -50,7 +50,8 @@ $G(n)$.  A position is a second-player win exactly when the XOR of its heaps' va
         - `.9c` has period 36, preperiod 28, saltus 16.
         - `.205200c` has preperiod 4, period 40 and saltus 16, except that $40k+19$ has
           value 6 and $40k+39$ has value 14.
-      We reproduced `.28`, `.29` and `.9c` with `octal-explorer` up to $n = 4000$.
+      We reproduced `.28`, `.29` and `.9c` with `octal-explorer`, and it proves all three
+      with Austin's Theorem 6.8.  It also proves Austin's own examples `.B8` and `.F8`.
     - *The open problem* is to settle the remaining games.
         - `.f6` apparently has period 43 and saltus 32 after a preperiod of 604, but one
           condition of the theorem fails, so this cannot be verified.  Our own data
