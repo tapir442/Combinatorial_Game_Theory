@@ -1,0 +1,43 @@
+[project]
+name = "octalgames"
+version = "0.1.0"
+description = "Explore nim-sequences of octal games: C backend, Python/Jupyter front end"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "matplotlib>=3.7",
+    "pillow>=10",
+]
+
+[project.optional-dependencies]
+# widgets, DataFrames and JupyterLab itself
+jupyter = [
+    "ipywidgets>=8",
+    "pandas>=2",
+    "jupyterlab>=4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "nbconvert>=7",
+    "ipykernel>=6",
+]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "python" }
+packages = ["octalgames"]
+
+[tool.setuptools.package-data]
+octalgames = ["liboctal.so"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
