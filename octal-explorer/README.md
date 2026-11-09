@@ -40,6 +40,7 @@ s.extend(300_000)                  # continue later
 s.plot_values(); s.plot_wrap(mode="diff"); s.plot_autocorr(); s.plot_histogram()
 s.dashboard()                      # all of the above
 s.explore()                        # interactive wrap explorer (ipywidgets)
+s.plot_folded(256)                 # value frequencies folded modulo 256
 s.wrap(W), s.image(W, mode), s.autocorr(), s.records(), s.counts(), s.to_frame()
 og.survey(og.octal_codes(2), 2000) # DataFrame over all 2-digit octal games
 ```

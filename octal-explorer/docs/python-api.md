@@ -30,6 +30,8 @@ Generated from the docstrings in `python/octalgames/`.
 
 ::: octalgames.plot_first_occurrence
 
+::: octalgames.plot_folded
+
 ::: octalgames.dashboard
 
 ## Interactive

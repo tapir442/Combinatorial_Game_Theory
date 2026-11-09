@@ -34,6 +34,8 @@ s.counts()        # counts[v]
 s.first_occurrence()
 s.p_positions()   # heap sizes with G = 0
 s.autocorr(1000)  # a[p] = match fraction at lag p (second half of the data)
+s.folded_frequency(256)   # counts folded mod 256: one row per block of 256 values
+s.folded_profile(256)     # average shape inside a block (1 = block average)
 s.best_lag()
 s.wrap(W)         # 2-D array, -1 padding at the end
 s.summary()       # dict; s.to_frame() gives a pandas DataFrame
@@ -54,6 +56,8 @@ s.plot_wrap(256, mode="ge", threshold=512)
 s.plot_autocorr(2000)
 s.plot_histogram()
 og.plot_first_occurrence(s)
+s.plot_folded(256)                   # value frequencies folded modulo 256 (profile + heat map)
+s.plot_folded(64, kind="profile")
 s.dashboard()                        # all in one figure
 ```
 

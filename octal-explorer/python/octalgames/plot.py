@@ -115,6 +115,76 @@ def plot_first_occurrence(s: NimSequence, ax=None, *, figsize=(8, 4)):
     return ax
 
 
+def plot_folded(s: NimSequence, block: int = 256, kind: str = "both", ax=None, *,
+                skip_first: bool = True, min_count: Optional[int] = None, figsize=(12, 7)):
+    """Value frequencies folded modulo ``block``.
+
+    Parameters
+    ----------
+    s
+        The sequence.
+    block
+        Block size, usually a power of two (256 shows the peaks of .7213 and .007).
+    kind
+        ``'profile'``: average frequency of each residue r = v mod block, relative
+        to the block average (1 = average); bars at multiples of block/4 are
+        darker.
+        ``'heatmap'``: one row per block of values (k*block .. (k+1)*block-1), one
+        column per residue, colour = frequency relative to that block's average
+        (log scale).  Shows *which* blocks have strong peaks.
+        ``'both'``: profile above heat map.
+    ax
+        Axes for 'profile' or 'heatmap'; for 'both' a pair of axes (or None).
+    skip_first
+        Leave block 0 out of the profile (see :meth:`NimSequence.folded_profile`).
+    min_count
+        Blocks with fewer heap sizes are left out of the profile and blank in the
+        heat map (default ``8 * block``: at least 8 per value on average).
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+
+    if kind not in ("profile", "heatmap", "both"):
+        raise ValueError("kind must be 'profile', 'heatmap' or 'both'")
+    if kind == "both":
+        if ax is None:
+            fig, ax = plt.subplots(2, 1, figsize=figsize, layout="constrained",
+                                   height_ratios=[1, 1.6])
+        plot_folded(s, block, "profile", ax[0], skip_first=skip_first, min_count=min_count)
+        plot_folded(s, block, "heatmap", ax[1], skip_first=skip_first, min_count=min_count)
+        return ax
+
+    ax = _ax(ax, (figsize[0], figsize[1] * 0.4 if kind == "profile" else figsize[1] * 0.6))
+    r = np.arange(block)
+    if kind == "profile":
+        prof = s.folded_profile(block, skip_first=skip_first, min_count=min_count)
+        quarter = max(1, block // 4)
+        colors = np.where(r % quarter == 0, "#d72828", "#78829a")
+        ax.bar(r, prof, width=1.0, color=colors)
+        ax.axhline(1, color="0.3", lw=0.8, ls="--")
+        ax.set_xlim(-0.5, block - 0.5)
+        ax.set_xlabel(f"v mod {block}")
+        ax.set_ylabel("frequency / block average")
+        top = int(np.nanargmax(prof)) if np.isfinite(prof).any() else 0
+        ax.set_title(f"{s.code}: value frequencies folded mod {block} "
+                     f"(peak at r = {top}: {np.nanmax(prof):.1f}× average)")
+    else:
+        F = s.folded_frequency(block, normalize=True)
+        sparse = s.folded_frequency(block).sum(axis=1) < (8 * block if min_count is None else min_count)
+        F[sparse] = np.nan                       # too few heap sizes to say anything
+        Fm = np.where(np.isfinite(F) & (F > 0), F, np.nan)
+        lo = np.nanmin(Fm) if np.isfinite(Fm).any() else 0.1
+        im = ax.imshow(Fm, aspect="auto", interpolation="nearest", cmap="magma",
+                       norm=LogNorm(vmin=max(lo, 1e-2), vmax=np.nanmax(Fm)),
+                       extent=(-0.5, block - 0.5, F.shape[0] * block, 0))
+        ax.set_xlabel(f"v mod {block}")
+        ax.set_ylabel("block start k·" + str(block))
+        ax.set_title(f"{s.code}: frequency of each value relative to its block's average"
+                     + (f" ({int(sparse.sum())} sparse block(s) blank)" if sparse.any() else ""))
+        plt.colorbar(im, ax=ax, label="× block average (log)")
+    return ax
+
+
 def dashboard(s: NimSequence, width: Optional[int] = None, figsize=(13, 11)):
     """Values, wrap, diff, autocorrelation and histogram in one figure."""
     import matplotlib.pyplot as plt
@@ -128,5 +198,5 @@ def dashboard(s: NimSequence, width: Optional[int] = None, figsize=(13, 11)):
     return fig
 
 
-for _f in (plot_values, plot_wrap, plot_autocorr, plot_histogram, plot_first_occurrence, dashboard):
+for _f in (plot_values, plot_wrap, plot_autocorr, plot_histogram, plot_first_occurrence, plot_folded, dashboard):
     setattr(NimSequence, _f.__name__, _f)

@@ -227,6 +227,77 @@ class NimSequence:
         first[vals] = idx
         return first
 
+    def folded_frequency(self, block: int = 256, *, normalize: bool = False) -> np.ndarray:
+        """Value frequencies folded modulo ``block``.
+
+        Parameters
+        ----------
+        block
+            Block size, usually a power of two.
+        normalize
+            Divide each row by its mean, so 1 means "as frequent as the average
+            value of that block".  Empty blocks become NaN.
+
+        Returns
+        -------
+        numpy.ndarray
+            Shape ``(n_blocks, block)``.  ``F[k, r]`` is the number of heap sizes
+            n with G(n) = k*block + r (or the normalised count).
+
+        Examples
+        --------
+        >>> og.compute(".77", 200).folded_frequency(4).shape    # Kayles: values 0..8
+        (3, 4)
+        """
+        if block < 1:
+            raise ValueError("block must be >= 1")
+        c = self.counts().astype(float)
+        nb = -(-len(c) // block)
+        F = np.zeros(nb * block)
+        F[:len(c)] = c
+        F = F.reshape(nb, block)
+        if normalize:
+            m = F.mean(axis=1, keepdims=True)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                F = np.where(m > 0, F / m, np.nan)
+        return F
+
+    def folded_profile(self, block: int = 256, *, min_count: Optional[int] = None,
+                       skip_first: bool = True) -> np.ndarray:
+        """Average shape of the value frequencies inside a block of ``block`` values.
+
+        Each block [k*block, (k+1)*block) is normalised to mean 1, then the blocks
+        are averaged.  ``profile[r] = 3`` means that values ≡ r (mod block) occur
+        three times as often as an average value of their block.  Peaks at r = 0
+        show that values just above multiples of ``block`` are favoured.
+
+        Parameters
+        ----------
+        block
+            Block size, usually a power of two.
+        min_count
+            Only use blocks with at least this many heap sizes (default
+            ``8 * block``, i.e. on average at least 8 per value), to avoid noisy
+            sparse blocks.
+        skip_first
+            Ignore block 0 (the small values from the start of the sequence, which
+            behave differently).
+
+        Returns
+        -------
+        numpy.ndarray
+            Length ``block``; all NaN if no block qualifies.
+        """
+        F = self.folded_frequency(block)
+        totals = F.sum(axis=1)
+        use = totals >= (8 * block if min_count is None else min_count)
+        if skip_first and len(use) > 1:
+            use[0] = False
+        if not use.any():
+            return np.full(block, np.nan)
+        rows = F[use] / F[use].mean(axis=1, keepdims=True)
+        return rows.mean(axis=0)
+
     def wrap(self, width: int, start: int = 0, rows: Optional[int] = None) -> np.ndarray:
         """2-D array: row r, column c holds G(start + r*width + c); -1 past the end."""
         G = self._G

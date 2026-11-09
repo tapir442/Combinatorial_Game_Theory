@@ -84,7 +84,19 @@ octal-explorer reports:
 | **diff** | dark where \(G(n) \ne G(n-W)\) | when \(W\) is a period, the picture is **blank below the preperiod**; the last dark cell is the last exception |
 | **autocorrelation** | for lag \(p\), the fraction of \(n\) in the second half with \(G(n) = G(n+p)\) | peaks at candidate periods; near-misses show "almost periods" |
 | **histogram** | how often each value occurs (log scale) | rare values; the gaps used by the rare/common-value method |
+| **folded frequencies** (`plot_folded`) | frequency of each value relative to the average of its block of \(B\) values, folded modulo \(B\) (profile), and per block (heat map) | peaks at \(v \equiv 0 \pmod B\): values just above multiples of large powers of two are favoured (see below) |
 | **bit planes** (explorer) | bit \(b\) of \(G(n)\) | regularities in individual bits often appear before full periodicity |
+
+!!! note "Why values just above multiples of powers of two are frequent"
+    In `.7213`, `.007` and `.6` the values \(v = k\cdot 256 + r\) with small
+    \(r\) occur several times more often than average.  For `.7213` up to
+    \(n = 10^6\), the first four values of each block of 256 occur about 6.5× as
+    often as an average value of their block, and the last quarter only 0.4×.  A
+    plausible explanation (not proved): XOR keeps aligned dyadic blocks together.
+    Values from \([a2^j,(a+1)2^j)\) and \([b2^j,(b+1)2^j)\) XOR to exactly the
+    block \([(a\oplus b)2^j,\dots)\), so the set of option values tends to be a union
+    of whole aligned blocks.  The mex, the first gap, then lies at the start of a
+    block.
 
 The colour of value \(v > 0\) has hue \(v \cdot 0.618034 \bmod 1\) (the golden-ratio
 step), saturation 0.70 and value 0.92.  Value 0 is \((25, 25, 35)\).  The C program, the

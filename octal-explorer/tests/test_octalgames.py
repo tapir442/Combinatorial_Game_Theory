@@ -100,3 +100,26 @@ def test_threads_give_speedup():
         list(ex.map(lambda c: og.compute(c, n, progress=False), [".6", ".007", ".07", ".137"]))
     four = time.perf_counter() - t
     assert four < 2.5 * one, (one, four)
+
+
+def test_folded_frequency_and_profile():
+    s = og.compute(".007", 20000, progress=False)
+    F = s.folded_frequency(64)
+    assert F.shape[1] == 64
+    assert F.sum() == len(s)                       # every heap size counted once
+    assert np.array_equal(F.ravel()[: s.max_value + 1], s.counts())
+    N = s.folded_frequency(64, normalize=True)
+    full = np.isfinite(N).all(axis=1)
+    assert np.allclose(N[full].mean(axis=1), 1.0)  # rows normalised to mean 1
+    prof = s.folded_profile(64)
+    assert prof.shape == (64,) and np.isclose(np.nanmean(prof), 1.0)
+    assert prof[:4].mean() > 1.0                   # block-start excess (see docs)
+
+
+def test_plot_folded_kinds():
+    import matplotlib
+    matplotlib.use("Agg")
+    s = og.compute(".007", 5000, progress=False)
+    for kind in ("profile", "heatmap"):
+        assert s.plot_folded(64, kind) is not None
+    assert len(s.plot_folded(64, "both")) == 2
