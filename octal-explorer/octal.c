@@ -1,5 +1,6 @@
-/*
- * octal.c — explore nim-sequences of octal and hexadecimal take-and-break games.
+/**
+ * @file octal.c
+ * @brief octal-explorer: explore nim-sequences of octal and hexadecimal take-and-break games.
  *
  *   octal .007 -n 200000            Treblecross, 200k heap sizes
  *   octal .6 -n 1000000 -o officers  Officers into directory "officers"
@@ -31,7 +32,10 @@
  * scan, so on .6 and .007 it is not faster.  --check compares both methods.
  *
  * Build with -DOCTAL_NO_MAIN -shared -fPIC for the library used by the Python
- * package (functions octal_rule_name, octal_extend, octal_period).
+ * package (functions octal_rule_name, octal_extend, octal_period; see octal.h).
+ *
+ * Sections: rules · Grundy computation · periodicity · graphics (PNG) ·
+ * output (HTML) · library API · command-line program.
  */
 #define _POSIX_C_SOURCE 200809L
 #include <ctype.h>
@@ -50,53 +54,70 @@
 
 #include "octal.h"
 
+/** Maximum number of code digits after the point (d_1 .. d_MAXDIG). */
 #define MAXDIG 64
 
+/** Named rules that are not plain take-and-break codes.
+ *  SP_GRUNDY: Grundy's game (split into two *unequal* heaps).
+ *  SP_COUPLES: Couples-are-forever (split any heap except a heap of 2). */
 enum { SP_NONE, SP_GRUNDY, SP_COUPLES };
 
+/**
+ * @brief A parsed game rule.
+ *
+ * Bit j of d[k] means: removing k beans and leaving exactly j nonempty heaps is
+ * allowed (j = 0..3).  d[0] describes splitting without removal.
+ */
 typedef struct {
-    unsigned d[MAXDIG + 1]; /* d[0] .. d[t] */
-    int t;                  /* index of last nonzero digit */
-    int special;
-    int hex;                /* some digit allows splitting into 3 heaps */
-    char code[80];
-    char name[120];
+    unsigned d[MAXDIG + 1]; /**< code digits d[0] .. d[t]; zero beyond t */
+    int t;                  /**< index of the last nonzero digit (0 if only d[0]) */
+    int special;            /**< SP_NONE, SP_GRUNDY or SP_COUPLES */
+    int hex;                /**< some digit has bit 3 (splitting into 3 heaps) */
+    char code[80];          /**< the code as given by the user */
+    char name[120];         /**< human-readable name, e.g. "octal game .007" */
 } Rule;
 
+/** @brief Result of compute(): the nim-sequence plus statistics. */
 typedef struct {
-    uint16_t *G;
-    long N;
-    double secs;
-    int sparse;          /* sparse method was active at the end */
-    unsigned mask;       /* rare/common mask */
-    long nrare;          /* rare heap sizes */
-    long long pairs;     /* two-heap pairs examined */
+    uint16_t *G;         /**< G[0..N): nim-values (owned; free() it) */
+    long N;              /**< number of heap sizes computed */
+    double secs;         /**< wall-clock seconds */
+    int sparse;          /**< sparse method was active at the end */
+    unsigned mask;       /**< rare/common mask (valid if sparse) */
+    long nrare;          /**< number of rare heap sizes (valid if sparse) */
+    long long pairs;     /**< two-heap pairs examined (work counter) */
 } Result;
 
+/** @brief Eventual period found by find_period(). */
 typedef struct {
-    long pre, per;
-    int found, proven;
+    long pre, per;       /**< preperiod i and period p: G(n+p) = G(n) for n >= i */
+    int found, proven;   /**< found: a period was detected; proven: certified by the theorem */
 } Period;
 
+/** Suppress progress and summary output (-q). */
 static int quiet = 0;
 
+/** Print "octal: msg" to stderr and exit with status 1. */
 static void die(const char *msg) {
     fprintf(stderr, "octal: %s\n", msg);
     exit(1);
 }
 
+/** malloc() that never returns NULL (dies instead); n = 0 allocates 1 byte. */
 static void *xmalloc(size_t n) {
     void *p = malloc(n ? n : 1);
     if (!p) die("out of memory");
     return p;
 }
 
+/** calloc() that never returns NULL (dies instead). */
 static void *xcalloc(size_t n, size_t s) {
     void *p = calloc(n ? n : 1, s ? s : 1);
     if (!p) die("out of memory");
     return p;
 }
 
+/** Monotonic clock in seconds, for timing. */
 static double now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -105,6 +126,7 @@ static double now(void) {
 
 /* ------------------------------------------------------------------ rules */
 
+/** Value of a hexadecimal digit character, or -1 if @p c is not one. */
 static int hexval(int c) {
     if (c >= '0' && c <= '9') return c - '0';
     c = tolower(c);
@@ -112,6 +134,18 @@ static int hexval(int c) {
     return -1;
 }
 
+/**
+ * @brief Parse a game code into a Rule.
+ *
+ * Accepts "grundy", "couples" (case-insensitive) and codes "[d0].d1d2..." where
+ * each digit is hexadecimal.  A leading "0" before the point is allowed
+ * ("0.07" == ".07").  Bits 0 and 1 of d0 are cleared, since they would describe
+ * non-moves.
+ *
+ * @param s  code string
+ * @param R  output (fully overwritten)
+ * @return 0 on success, -1 if @p s is not a valid code or has no nonzero digit
+ */
 static int parse_rule(const char *s, Rule *R) {
     memset(R, 0, sizeof *R);
     snprintf(R->code, sizeof R->code, "%s", s);
@@ -155,9 +189,17 @@ static int parse_rule(const char *s, Rule *R) {
 
 /* ------------------------------------------------------ Grundy computation */
 
+/**
+ * Stamp table for the mex: seen[v] == n means "v is the value of an option of
+ * heap size n".  Using n as the stamp avoids clearing the table for every n;
+ * it is reset (memset to 0xFF, which never equals a valid n) at the start of
+ * each computation.  Global, hence the library is not thread-safe.
+ */
 static uint32_t *seen;
+/** Number of entries allocated in #seen. */
 static size_t seen_cap;
 
+/** Grow #seen to at least @p need entries (power of two); new entries are unmarked. */
 static void ensure_seen(size_t need) {
     if (need <= seen_cap) return;
     size_t c = seen_cap ? seen_cap : 1024;
@@ -168,24 +210,41 @@ static void ensure_seen(size_t need) {
     seen_cap = c;
 }
 
+/** Sparse mode: value @p v is "rare" iff popcount(v & mask) is odd.
+ *  An XOR of two values is rare iff exactly one of them is rare. */
 static inline int is_rare(unsigned v, unsigned mask) {
     return __builtin_parity(v & mask);
 }
 
-/* Minimal excludant: the smallest value >= start not marked with stamp st
- * (seen[v] == st means "v is the value of an option of the current heap").
- * The caller must have marked all options of interest beforehand. */
+/**
+ * @brief Minimal excludant from @p start: the smallest value v >= start that is
+ *        not marked with stamp @p st (seen[v] != st).
+ *
+ * The caller must have marked all options of the current heap with @p st
+ * beforehand.  The result is bounded by the size of #seen (see ensure_seen()).
+ */
 static inline unsigned mex_from(unsigned start, uint32_t st) {
     unsigned v = start;
     while (seen[v] == st) v++;
     return v;
 }
 
+/** Minimal excludant: the smallest value not marked with stamp @p st. */
 static inline unsigned mex(uint32_t st) {
     return mex_from(0, st);
 }
 
-/* Mark values of 0-, 1- and 3-heap moves (never sparse). */
+/**
+ * @brief Mark the values of all 0-, 1- and 3-heap options of heap size @p n.
+ *
+ * Two-heap options are marked by the callers (brute force or sparse).
+ * Three-heap splits a <= b <= c are enumerated directly: O(n^2) per call.
+ *
+ * @param R   rule
+ * @param G   nim-values of all heap sizes < n
+ * @param n   heap size
+ * @param st  stamp to write into #seen (normally n)
+ */
 static void mark_simple(const Rule *R, const uint16_t *G, long n, uint32_t st) {
     int tmax = R->t < n ? R->t : (int)n;
     for (int k = 0; k <= tmax; k++) {
@@ -201,12 +260,26 @@ static void mark_simple(const Rule *R, const uint16_t *G, long n, uint32_t st) {
     }
 }
 
+/** Is splitting heap @p n into heaps @p a and @p b allowed by the named rule?
+ *  Grundy's game forbids a == b; Couples forbids splitting a heap of 2. */
 static inline int pair_allowed(const Rule *R, long n, long a, long b) {
     if (R->special == SP_GRUNDY && a == b) return 0;
     if (R->special == SP_COUPLES && n == 2) return 0;
     return 1;
 }
 
+/**
+ * @brief Nim-value of heap size @p n by brute force.
+ *
+ * Marks every option (all two-heap splits a + b = n - k with 1 <= a <= b, plus
+ * mark_simple()) and returns their mex.  O(n) for octal codes.
+ *
+ * @param R      rule
+ * @param G      nim-values of all heap sizes < n
+ * @param n      heap size
+ * @param pairs  incremented by the number of two-heap splits examined
+ * @return G(n)
+ */
 static unsigned grundy_brute(const Rule *R, const uint16_t *G, long n, long long *pairs) {
     uint32_t st = (uint32_t)n;
     mark_simple(R, G, n, st);
@@ -225,6 +298,26 @@ static unsigned grundy_brute(const Rule *R, const uint16_t *G, long n, long long
     return mex(st);
 }
 
+/**
+ * @brief Nim-value of heap size @p n with the rare/common (sparse) method.
+ *
+ * 1. Marks all options from pairs containing a rare heap (the only source of
+ *    rare XORs), plus mark_simple().
+ * 2. Scans all pairs, tracking the current mex `lo`; stops as soon as `lo` is
+ *    rare, because every rare reachable value is already marked.
+ *
+ * Gives the same result as grundy_brute() (checked by --check), but is not
+ * faster on games whose nim-values are mostly common.
+ *
+ * @param R      rule
+ * @param G      nim-values of all heap sizes < n
+ * @param n      heap size
+ * @param mask   rare/common mask (see is_rare())
+ * @param rare   ascending list of rare heap sizes < n
+ * @param nrare  length of @p rare
+ * @param pairs  incremented by the number of pairs scanned in step 2
+ * @return G(n)
+ */
 static unsigned grundy_sparse(const Rule *R, const uint16_t *G, long n, unsigned mask,
                               const long *rare, long nrare, long long *pairs) {
     uint32_t st = (uint32_t)n;
@@ -263,7 +356,17 @@ static unsigned grundy_sparse(const Rule *R, const uint16_t *G, long n, unsigned
     return lo;
 }
 
-/* Pick the mask that makes the fewest heap sizes rare. */
+/**
+ * @brief Choose the sparse-mode mask that makes the fewest heap sizes rare.
+ *
+ * Tries every mask 1 .. vcap-1 against the value histogram of G[1..n).
+ *
+ * @param G           nim-values
+ * @param n           number of values to consider
+ * @param vcap        power of two above the largest value
+ * @param rare_count  out: number of rare heap sizes for the chosen mask
+ * @return the chosen mask
+ */
 static unsigned choose_mask(const uint16_t *G, long n, unsigned vcap, long *rare_count) {
     long *cnt = xcalloc(vcap, sizeof *cnt);
     for (long i = 1; i < n; i++) cnt[G[i]]++;
@@ -280,6 +383,19 @@ static unsigned choose_mask(const uint16_t *G, long n, unsigned vcap, long *rare
     return best;
 }
 
+/**
+ * @brief Compute G(0) .. G(N-1) (command-line program).
+ *
+ * Uses grundy_brute(), or grundy_sparse() when @p allow_sparse is set and a
+ * mask makes fewer than 25% of heap sizes rare.  The mask is re-chosen at
+ * n = 2048, 8192, 32768, ...  Shows progress on stderr when it is a terminal.
+ * Dies if a value exceeds 65535.
+ *
+ * @param R             rule
+ * @param N             number of heap sizes
+ * @param allow_sparse  enable the experimental sparse method
+ * @return the sequence and statistics; the caller frees Result.G
+ */
 static Result compute(const Rule *R, long N, int allow_sparse) {
     Result res = {0};
     res.N = N;
@@ -360,9 +476,21 @@ static Result compute(const Rule *R, long N, int allow_sparse) {
 
 /* ------------------------------------------------------------ periodicity */
 
-/* Octal periodicity theorem (Winning Ways): if G(n+p) = G(n) for all n with
- * i <= n < 2i + p + t, where t is the last nonzero code digit, then the
- * sequence is periodic from i on.  Applies to finite octal codes with d0 = 0. */
+/**
+ * @brief Find an eventual period of G[0..N).
+ *
+ * For p = 1, 2, ..., N/2 the preperiod i is the smallest index with
+ * G(n) = G(n+p) for all i <= n < N-p (found by scanning backwards).
+ *
+ * Octal periodicity theorem (Winning Ways, ch. 4): if G(n+p) = G(n) for all
+ * i <= n < 2i + p + t, where t is the last nonzero code digit, the sequence is
+ * periodic from i on.  So p is *proved* once N >= 2i + 2p + t; this is only
+ * claimed for plain octal codes (no d0, no hex digits, no named rules).
+ *
+ * Returns the first proved period; otherwise the smallest p with N - i >= 3p
+ * as an *apparent* period (multiples of it are skipped, keeping the search
+ * linear for periodic data); otherwise found = 0.
+ */
 static Period find_period(const uint16_t *G, long N, const Rule *R) {
     int can_prove = R->special == SP_NONE && R->d[0] == 0 && !R->hex;
     Period ap = {0};
@@ -384,11 +512,13 @@ static Period find_period(const uint16_t *G, long N, const Rule *R) {
 
 /* -------------------------------------------------------------- graphics */
 
+/** @brief An RGB image in memory (8 bits per channel, rows top to bottom). */
 typedef struct {
-    int w, h;
-    uint8_t *p;
+    int w, h;            /**< width and height in pixels */
+    uint8_t *p;          /**< w*h*3 bytes, row-major RGB (owned; free() it) */
 } Image;
 
+/** New @p w x @p h image filled with colour (r, g, b). */
 static Image img_new(int w, int h, int r, int g, int b) {
     Image im = {w, h, xmalloc((size_t)w * h * 3)};
     for (long i = 0; i < (long)w * h; i++) {
@@ -397,21 +527,25 @@ static Image img_new(int w, int h, int r, int g, int b) {
     return im;
 }
 
+/** Set pixel (x, y) to colour @p c; coordinates outside the image are ignored. */
 static inline void px(Image *im, int x, int y, const uint8_t c[3]) {
     if (x < 0 || y < 0 || x >= im->w || y >= im->h) return;
     uint8_t *q = im->p + 3 * ((size_t)y * im->w + x);
     q[0] = c[0]; q[1] = c[1]; q[2] = c[2];
 }
 
+/** Fill the rectangle [x0, x1) x [y0, y1) with colour @p c (clipped). */
 static void rect(Image *im, int x0, int y0, int x1, int y1, const uint8_t c[3]) {
     for (int y = y0; y < y1; y++)
         for (int x = x0; x < x1; x++) px(im, x, y, c);
 }
 
+/** Store @p v big-endian in b[0..3] (PNG byte order). */
 static void put32(uint8_t *b, uint32_t v) {
     b[0] = v >> 24; b[1] = v >> 16; b[2] = v >> 8; b[3] = v;
 }
 
+/** Write one PNG chunk: length, 4-byte @p type, @p data, CRC-32 of type+data. */
 static void chunk(FILE *f, const char *type, const uint8_t *data, uint32_t len) {
     uint8_t h[8];
     put32(h, len);
@@ -425,6 +559,12 @@ static void chunk(FILE *f, const char *type, const uint8_t *data, uint32_t len) 
     fwrite(c, 1, 4, f);
 }
 
+/**
+ * @brief Write @p im as an 8-bit RGB PNG file.
+ *
+ * Every row uses filter type 0; the image data is compressed with zlib level 6.
+ * Dies on I/O or compression errors.
+ */
 static void png_save(const Image *im, const char *path) {
     size_t stride = (size_t)im->w * 3 + 1, rawlen = stride * im->h;
     uint8_t *raw = xmalloc(rawlen);
@@ -450,6 +590,7 @@ static void png_save(const Image *im, const char *path) {
     free(z);
 }
 
+/** Convert HSV (all components in [0, 1]) to 8-bit RGB in @p c. */
 static void hsv(double h, double s, double v, uint8_t c[3]) {
     double r, g, b, f = h * 6 - floor(h * 6);
     double p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
@@ -464,16 +605,33 @@ static void hsv(double h, double s, double v, uint8_t c[3]) {
     c[0] = (uint8_t)(255 * r + .5); c[1] = (uint8_t)(255 * g + .5); c[2] = (uint8_t)(255 * b + .5);
 }
 
-/* Value 0 (P-positions) is near-black; others get golden-ratio hues.
- * The same formula is used by the HTML explorer. */
+/**
+ * @brief Colour of nim-value @p v, shared by all plots and the HTML explorer.
+ *
+ * 0 (P-positions) is near-black (25, 25, 35).  v > 0 has hue v * 0.618034 mod 1
+ * (golden-ratio steps keep neighbouring values distinct), saturation 0.70 and
+ * value 0.92.  The Python package (octalgames.palette) uses the same formula.
+ */
 static void palette(unsigned v, uint8_t c[3]) {
     if (v == 0) { c[0] = 25; c[1] = 25; c[2] = 35; return; }
     hsv(fmod(v * 0.6180339887, 1.0), 0.70, 0.92, c);
 }
 
+/** Plot colours: grid lines, record markers, separator line in wrap plots. */
 static const uint8_t GRID[3] = {225, 225, 232},
                      RED[3] = {215, 40, 40}, SEP[3] = {200, 30, 30};
 
+/**
+ * @brief values.png: G(n) against n, 1600 x 640 pixels.
+ *
+ * Points are binned per pixel and shaded by log(count); grey lines mark powers
+ * of two; red squares mark each new record value.
+ *
+ * @param G     nim-values
+ * @param N     number of values
+ * @param maxG  largest value (top of the y axis)
+ * @param path  output file
+ */
 static void plot_values(const uint16_t *G, long N, unsigned maxG, const char *path) {
     const int W = 1600, H = 640;
     Image im = img_new(W, H, 255, 255, 255);
@@ -514,13 +672,22 @@ static void plot_values(const uint16_t *G, long N, unsigned maxG, const char *pa
     free(im.p);
 }
 
-/* Layout shared by wrap.png and wrapdiff.png: rows of width W; if too many
- * rows, show the first and last halves separated by a red line. */
+/**
+ * @brief Layout shared by wrap.png and wrapdiff.png.
+ *
+ * Rows of W values; if there are too many rows for about 1800 pixels, the first
+ * rows_top and the last rows_bot rows are shown, separated by a red line.
+ */
 typedef struct {
-    int W, cs, rows_top, rows_bot, sep;
-    long rows;
+    int W;               /**< values per row */
+    int cs;              /**< cell size in pixels (1..12) */
+    int rows_top;        /**< rows drawn from the start */
+    int rows_bot;        /**< rows drawn from the end (0 if everything fits) */
+    int sep;             /**< height of the separator line in pixels (0 or 4) */
+    long rows;           /**< total number of rows, ceil(N / W) */
 } WrapLayout;
 
+/** Compute the wrap layout for @p N values in rows of @p W (cell size 1600/W, clamped to 1..12). */
 static WrapLayout wrap_layout(long N, int W) {
     WrapLayout L;
     L.W = W;
@@ -537,6 +704,16 @@ static WrapLayout wrap_layout(long N, int W) {
     return L;
 }
 
+/**
+ * @brief wrap.png / wrapdiff.png: the sequence in rows of @p W values.
+ *
+ * @param G     nim-values
+ * @param N     number of values
+ * @param W     row width
+ * @param diff  0: colour cells by value (palette());
+ *              1: dark red where G(n) != G(n-W), light otherwise, grey in the first row
+ * @param path  output file
+ */
 static void plot_wrap(const uint16_t *G, long N, int W, int diff, const char *path) {
     WrapLayout L = wrap_layout(N, W);
     int iw = W * L.cs, ih = (L.rows_top + L.rows_bot) * L.cs + L.sep;
@@ -562,6 +739,12 @@ static void plot_wrap(const uint16_t *G, long N, int W, int diff, const char *pa
     free(im.p);
 }
 
+/**
+ * @brief Autocorrelation of the second half of the sequence.
+ *
+ * @return newly allocated array a[0..L]; a[p] = fraction of n in [N/2, N-p)
+ *         with G(n) = G(n+p); a[0] = 0 (unused).  The caller frees it.
+ */
 static double *autocorr(const uint16_t *G, long N, int L) {
     double *a = xcalloc(L + 1, sizeof *a);
     long start = N / 2;
@@ -573,6 +756,15 @@ static double *autocorr(const uint16_t *G, long N, int L) {
     return a;
 }
 
+/**
+ * @brief autocorr.png: bars of a[1..L] (several lags per pixel use the maximum).
+ *
+ * @param a     autocorrelation from autocorr()
+ * @param L     number of lags
+ * @param per   detected period (multiples drawn orange), or 0
+ * @param peak  best lag (drawn red)
+ * @param path  output file
+ */
 static void plot_autocorr(const double *a, int L, int per, int peak, const char *path) {
     int W = L * 2 < 1600 ? (L * 2 < 400 ? 400 : L * 2) : 1600, H = 360;
     Image im = img_new(W, H, 255, 255, 255);
@@ -593,6 +785,11 @@ static void plot_autocorr(const double *a, int L, int per, int peak, const char 
     free(im.p);
 }
 
+/**
+ * @brief histogram.png: frequency of each value 0..maxG, log10(count+1) scale.
+ *
+ * Bars use palette() colours, so the histogram doubles as a colour legend.
+ */
 static void plot_hist(const long *cnt, unsigned maxG, const char *path) {
     int nv = (int)maxG + 1;
     int bw = 1600 / nv;
@@ -624,10 +821,32 @@ static void plot_hist(const long *cnt, unsigned maxG, const char *path) {
 
 /* ---------------------------------------------------------------- output */
 
+/** out = dir + "/" + name (truncated to @p sz bytes). */
 static void join(char *out, size_t sz, const char *dir, const char *name) {
     snprintf(out, sz, "%s/%s", dir, name);
 }
 
+/**
+ * @brief Write DIR/index.html: summary, plots, records and the interactive explorer.
+ *
+ * The first @p embed values are embedded as a JavaScript Uint16Array, so the page
+ * works from file:// without a server.  The explorer's JavaScript uses the same
+ * palette as palette().
+ *
+ * @param dir    output directory
+ * @param R      rule
+ * @param res    computed sequence
+ * @param P      period result
+ * @param maxG   largest value
+ * @param maxat  first n with G(n) = maxG
+ * @param wrapW  default wrap width
+ * @param peak   best autocorrelation lag
+ * @param L      number of autocorrelation lags
+ * @param embed  maximum number of values to embed
+ * @param recn   heap sizes of the record values
+ * @param recv   the record values
+ * @param nrec   number of records
+ */
 static void write_html(const char *dir, const Rule *R, const Result *res, const Period *P,
                        unsigned maxG, long maxat, int wrapW, int peak, int L, long embed,
                        const long *recn, const unsigned *recv, int nrec) {
@@ -753,7 +972,7 @@ static void write_html(const char *dir, const Rule *R, const Result *res, const 
 
 /* ---------------------------------------------------------- library API */
 
-/* Name of the rule, or -1 if the code does not parse. */
+/** See octal.h.  Human-readable name of @p code; -1 if it does not parse. */
 int octal_rule_name(const char *code, char *name, int len) {
     Rule R;
     if (parse_rule(code, &R)) return -1;
@@ -761,8 +980,11 @@ int octal_rule_name(const char *code, char *name, int len) {
     return 0;
 }
 
-/* Fill G[from..to) given G[0..from).  Brute force; not thread-safe.
- * Returns 0, -1 (bad code) or -2 (value > 65535). */
+/**
+ * See octal.h.  Fill G[from..to) given G[0..from) with grundy_brute().
+ * Resets the stamp table, so stale stamps from earlier calls cannot match.
+ * Not thread-safe.  Returns 0, -1 (bad code) or -2 (value > 65535).
+ */
 int octal_extend(const char *code, uint16_t *G, long from, long to) {
     Rule R;
     if (parse_rule(code, &R)) return -1;
@@ -786,7 +1008,8 @@ int octal_extend(const char *code, uint16_t *G, long from, long to) {
     return 0;
 }
 
-/* Period search.  Returns 0 none, 1 apparent, 2 proved; out = {pre, per}. */
+/** See octal.h.  Wraps find_period(): returns 0 none, 1 apparent, 2 proved
+ *  (-1 bad code) and stores out[0] = preperiod, out[1] = period. */
 int octal_period(const char *code, const uint16_t *G, long N, long *out) {
     Rule R;
     if (parse_rule(code, &R)) return -1;
@@ -797,6 +1020,7 @@ int octal_period(const char *code, const uint16_t *G, long N, long *out) {
 }
 
 #ifndef OCTAL_NO_MAIN
+/** Print command-line help to stderr and exit with status 2. */
 static void usage(void) {
     fprintf(stderr,
 "usage: octal CODE [options]\n"
@@ -814,6 +1038,14 @@ static void usage(void) {
     exit(2);
 }
 
+/**
+ * @brief Command-line program: compute, analyse and write all output files.
+ *
+ * Steps: parse options and the code; compute(); optionally --check against
+ * brute force or -p print; statistics (max value, histogram, records);
+ * find_period(); autocorrelation and best lag; choose the wrap width; write
+ * values.csv, the PNG plots, index.html and summary.txt.  See usage().
+ */
 int main(int argc, char **argv) {
     long N = 10000, embed = 200000;
     int W = 0, L = 1000, sparse = 0, check = 0, print = 0;

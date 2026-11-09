@@ -31,6 +31,13 @@ uv run pytest      # Python: C backend vs a pure-Python reference on 7 codes,
 The pure-Python reference in `tests/test_octalgames.py` (`brute`) is the independent
 check.  Compare new rule types against it too.
 
+## Code comments
+
+Every type, global and function in `octal.c` and `octal.h` has a Doxygen-style
+comment (`/** ... */`, with `@param`, `@return` and `/**< */` for struct fields).
+Keep that style for new code.  `doxygen -g` followed by `doxygen` produces an HTML
+reference if you want one; Doxygen is not required for the build.
+
 ## Adding a rule type
 
 Example: Pulleyblank's "split only heaps larger than h" (task 1.15).
