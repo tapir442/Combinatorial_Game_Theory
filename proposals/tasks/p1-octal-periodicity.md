@@ -6,7 +6,8 @@ subtraction games without any changes.
 
 ## Phase 0 — Foundations (months 1–3)
 
-- [ ] **1.1 Background reading** (3 wk). *Winning Ways* ch. 4, Siegel *CGT* ch. IV,
+- [ ] **1.1 Background reading** (3 wk). Start from the chapter *What is known about octal
+  games* (`../src/90-background-octal-games.md`).  Then *Winning Ways* ch. 4, Siegel *CGT* ch. IV,
   Nowakowski A1–A3, Ward's conjecture paper, Santos' dynamical-systems bound.
   *Output:* a 10-page literature note.
 - [ ] **1.2 Reproduce known results** (1 wk). Use `og.survey(og.octal_codes(2), …)` and

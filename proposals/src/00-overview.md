@@ -13,4 +13,8 @@ The problems come from three places. The first is Nowakowski's *Unsolved Problem
 | 5 | Scoring play, loopy games, entailing moves | Algebraic structure | Low | Medium |
 | 6 | Values, temperatures and nim-dimension of placement games | Computational CGT | High | Low–medium |
 
+A background chapter, *What is known about octal games*, follows the six proposals.  It
+covers the theory, the solved and open games, computation, complexity and misère play,
+and supports Proposals 1, 2 and 4.
+
 This repo already contains a CGSuite 2.1.1 installer. Proposals 1, 3 and 6 can use it from the first month, and the others can use it for experiments.

@@ -2,7 +2,7 @@
 
 **Working title:** *The structure of nim-sequences: from three-element subtraction games to Treblecross*
 
-**Core problem.** Guy conjectured that every finite octal game has an eventually periodic nim-sequence (Nowakowski, Problem A2). No finite octal game has been shown to be aperiodic. Dozens of small cases are still open, among them .6 (Officers), .007 (Treblecross), .14, .36, .64 and Grundy's game.
+**Core problem.** Guy conjectured that every finite octal game has an eventually periodic nim-sequence (Nowakowski, Problem A2). No finite octal game has been shown to be aperiodic. Dozens of small cases are still open, among them .6 (Officers), .007 (Treblecross), .14, .36, .64 and Grundy's game.  The chapter *What is known about octal games* surveys the background.
 
 **State of the art (2025).**
 

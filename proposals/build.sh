@@ -22,14 +22,24 @@ for f in src/0[1-6]-*.md; do
   name=$(basename "$f" .md)
   title=$(head -1 "$f" | sed 's/^# //')
   # Drop the H1 (used as the document title) and append the sources
-  { tail -n +2 "$f"; echo; cat "$tmp/sources.md"; } > "$tmp/$name.md"
+  { tail -n +2 "$f"; echo; cat "$tmp/sources.md"
+    # Proposal 1 builds on the octal-games background chapter: append it
+    if [ "$name" = 01-octal-periodicity ]; then echo; cat src/90-background-octal-games.md; fi
+  } > "$tmp/$name.md"
   pandoc "$tmp/$name.md" "${opts[@]}" \
     -V title="$title" -V subtitle="PhD proposal in Combinatorial Game Theory" \
     -o "pdf/$name.pdf"
   echo "built pdf/$name.pdf"
 done
 
-pandoc src/00-overview.md src/0[1-6]-*.md src/99-further-and-sources.md "${opts[@]}" \
+# Background chapter on its own
+tail -n +2 src/90-background-octal-games.md > "$tmp/bg.md"
+pandoc "$tmp/bg.md" "${opts[@]}" \
+  -V title="What is known about octal games" -V subtitle="Background for the CGT PhD proposals" \
+  -o pdf/90-background-octal-games.pdf
+echo "built pdf/90-background-octal-games.pdf"
+
+pandoc src/00-overview.md src/0[1-6]-*.md src/90-background-octal-games.md src/99-further-and-sources.md "${opts[@]}" \
   --toc -V toc-title="Contents" --number-sections=false \
   -V title="PhD Proposals: Open Problems in Combinatorial Game Theory" \
   -V documentclass=report -V classoption=openany \
