@@ -8,9 +8,9 @@
 
 - Hanner and Milnor founded thermography. Berlekamp and Spight developed komaster and *dogmatic* (neutral ko-threat environment) thermography for Go.
 - There is no machinery for dogmatic thermographs of double kos (several alternating 2-cycles joined at one node). Siegel names this as the obvious next step (E4.2).
-- It is unproved that the Left scaffold of a dogmatic thermograph decreases in t (E4.1). The statement is false for komaster thermographs.
+- It is unproved that the Left scaffold of a dogmatic thermograph decreases in $t$ (E4.1). The statement is false for komaster thermographs.
 - Wolfe asks for a formal proof that Sentestrat works and for an efficient top-down thermography algorithm (E4).
-- Atomic weight is well defined only for some loopy infinitesimals. Siegel asks for an algorithm that computes it whenever g sits between loopfree all-smalls of equal atomic weight (E5).
+- Atomic weight is well defined only for some loopy infinitesimals. Siegel asks for an algorithm that computes it whenever $g$ sits between loopfree all-smalls of equal atomic weight (E5).
 - Berlekamp asks for a common framework for atomic weights and Nakamura's liberty-counting theory of Go capturing races, or for proof that they differ (B1).
 
 **Research questions.**
@@ -20,7 +20,7 @@
 3. Propose axioms for temperature on general loopy games that specialise to both Go thermography and classical stoppers (E4.3).
 4. Give an algorithm for the atomic weight of infinitesimal stoppers (E5).
 5. Unify atomic weight with Nakamura's liberties, and extend Nakamura's theory to kos (B1).
-6. Bound *boiling points*: show that confusion intervals bounded by k give BP ≤ 3k/2 sharply, and find better general upper bounds (E20).
+6. Bound *boiling points*: show that confusion intervals bounded by $k$ give $\mathrm{BP} \le 3k/2$ sharply, and find better general upper bounds (E20).
 
 **Methods.** Thermographic calculus; ordered abelian groups and the loopy simplest-form theorem; an implementation in CGSuite (its loopy-game and thermograph modules); and Go endgame databases for test cases.
 

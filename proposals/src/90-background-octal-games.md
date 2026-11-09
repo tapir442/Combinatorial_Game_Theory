@@ -18,7 +18,7 @@ $G(n)$.  A position is a second-player win exactly when the XOR of its heaps' va
 ## Theory
 
 - **Octal periodicity theorem** (Guy & Smith 1956; *Winning Ways* ch. 4).  Let $t$ be the
-  position of the last nonzero digit.  If $G(n+p)=G(n)$ for all $i \le n < 2i+p+t$, then
+  position of the last nonzero digit.  If $G(n+p)=G(n)$ for all $i \le n \lt 2i+p+t$, then
   the sequence has period $p$ from $i$ on.  So finitely many computed values can *prove*
   periodicity.  This is the basis of every solved octal game.
 - **Guy's conjecture** (Problem A2).  Every finite octal game is eventually periodic.  It
@@ -26,17 +26,51 @@ $G(n)$.  A position is a second-player win exactly when the XOR of its heaps' va
 - **Subtraction games** (Problem A1).  With a finite subtraction set the nim-sequence is
   always periodic, by a pigeonhole argument.  The period itself is the open part:
     - Ward conjectured a closed formula for three-element sets and checked it for
-      $c < 4096$.  It is unproved.
+      $c \lt 4096$.  It is unproved.
     - Guy conjectures a polynomial bound on the period length, and Santos improved the
       known bound with dynamical-systems methods.
     - Sets with no preperiod are not characterised.
-- **Arithmetic periodicity** (Problem A3).  Hexadecimal games, which can split into 3 or
-  more heaps, can satisfy $G(n+p)=G(n)+s$ with a *saltus* $s$.  Austin (1976) and
-  Howse–Nowakowski give finite tests for this.  Example: `.28` has period 53 and saltus
-  16.
+- **Arithmetic periodicity** (Problem A3).  Hexadecimal games can split a heap into 3
+  heaps, and their nim-values may grow without bound.  The right notion is then
+  *arithmetic periodicity*: there are a preperiod $i$, a period $p$ and a **saltus** $s$
+  with
+
+  ```math
+  G(n+p) = G(n) + s \quad\text{for all } n \ge i.
+  ```
+
+  Equivalently, from $i$ on the values lie on $p$ arithmetic progressions, all with
+  common difference $s$.  Ordinary periodicity is the case $s = 0$.  Austin's Theorem 6.8
+  (thesis, 1976) and its generalisation by Howse and Nowakowski confirm arithmetic
+  periodicity from finitely many values.  Nowakowski computed the first 100,000 values
+  of every 1-, 2- and 3-digit hexadecimal game.
+    - *Solved examples:*
+        - `.28` and `.29` have identical sequences: period 53, saltus 16, with only
+          G(0) = 0 exceptional.
+        - `.9c` has period 36, preperiod 28, saltus 16.
+        - `.205200c` has preperiod 4, period 40 and saltus 16, except that $40k+19$ has
+          value 6 and $40k+39$ has value 14.
+      We reproduced `.28`, `.29` and `.9c` with `octal-explorer` up to $n = 4000$.
+    - *The open problem* is to settle the remaining games.
+        - `.f6` apparently has period 43 and saltus 32 after a preperiod of 604, but one
+          condition of the theorem fails, so this cannot be verified.  Our own data
+          disagree: the relation $G(n+43)=G(n)+32$ holds for $604 \le n \le 1885$ and
+          then breaks ($G(1929) \ne G(1886)+32$).  octal-explorer and CGSuite give
+          identical values here.  So this needs checking against the original
+          computation.
+        - `.9` shows a fractal-like set of values up to $n = 10^5$ (Howse–Nowakowski).
+        - `.7f` strongly tends to period 8 and saltus 4, but has 14 exceptional values
+          for $n \le 10^5$, the largest being $G(94{,}156) = 26{,}614$.
+        - Also open: `.e`, `.b6` ("looks octal"), `.b33b` ($G(n) = n$ except for 27
+          seemingly random heap sizes), and the families `.1x`, `.2x`, `.3x`, `.4x`,
+          `.5x`, `.6x`, `.7x`, `.9x`, `.bx`, `.dx`, `.fx` for the values of x listed in
+          A3.
+    - Related patterns: `.660060008` appears to have the same kind of regularity as
+      `.205200c`, with period about 300,000.  The codes `.200…0048` with an odd number
+      of zeros show "ruler function" patterns (Grossman–Nowakowski).
 - **Infinite codes and variants.**
     - Complements of finite subtraction sets are always arithmetically periodic
-      (A. Siegel).  An extreme example is "all except $\{4, 9, 26, 30\}$": preperiod 243,
+      (A. Siegel).  An extreme example is "all except $\lbrace 4, 9, 26, 30\rbrace$": preperiod 243,
       period 13,014, saltus 4,702.
     - Moves that depend on $n$ can give aperiodic sequences, as in Fraenkel's
       subtraction–division games and Larsson–Fox.  So aperiodicity is possible *outside*
@@ -70,13 +104,13 @@ Problem A2 lists **65 open codes**: `.6`, eight two-digit codes (`.04`, `.06`, `
 - **Grundy's game** (split a heap into two unequal heaps).  Values are known up to
   $2^{35}$ with no period (Hoey; Flammenkamp).
 - **Couples-are-forever** (split any heap except a heap of 2).  No period in the first
-  50 million values.  The families of Pulleyblank (split only heaps $> h$) and Singmaster
+  50 million values.  The families of Pulleyblank (split only heaps $\gt h$) and Singmaster
   (both parts $\ge k$) are open too.
 
 ## Computation and structure
 
 - **Sparse space.**  In many games the values split into *rare* and *common* ones, by the
-  parity of $\operatorname{popcount}(v \mathbin{\&} m)$ for a fixed mask $m$.  Flammenkamp
+  parity of $\operatorname{popcount}(v \mathbin{\mathrm{AND}} m)$ for a fixed mask $m$.  Flammenkamp
   and Grossman, among others, exploit this to compute far beyond brute force.  (A naive
   rare/common variant in `octal-explorer` gives no speed-up on `.6` or `.007`.  A faithful
   implementation is task 1.12.)

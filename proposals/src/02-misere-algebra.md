@@ -2,14 +2,14 @@
 
 **Working title:** *Invertibility and cancellation in restricted misère universes*
 
-**Core problem.** In misère play G + (−G) is usually not 0, so misère games form a monoid rather than a group. The theory now works modulo a *universe* (dicots, dead-ending games, impartial positions of one ruleset). Two families of questions are open: the structure of impartial misère quotients (Problems A15, E12) and inverses and cancellation in partizan universes (E13).
+**Core problem.** In misère play $G + (-G)$ is usually not $0$, so misère games form a monoid rather than a group. The theory now works modulo a *universe* (dicots, dead-ending games, impartial positions of one ruleset). Two families of questions are open: the structure of impartial misère quotients (Problems A15, E12) and inverses and cancellation in partizan universes (E13).
 
 **State of the art.**
 
 - Plambeck and Siegel's misère quotients solved many octal games. The quotient of Dawson's Kayles (.07) has order 638 at heap size 33, and its behaviour from heap 34 onward is unknown. Plambeck offers US\$500 for a complete analysis. Dawson posed the problem in 1935, which may make it the oldest open problem in CGT.
 - Quotient elements of periods 1, 2, 3, 4, 6 and infinity are known. No period-5 element has been found.
 - Fisher et al. and Milley–Renault characterised invertible dicots and invertible dead-ending games. Milley's strip counterexample shows that non-conjugate inverses exist in some universes.
-- McKay, Milley, Nowakowski and Santos claim the dead-ending universe is pocancellative (G + X ≥ H + X implies G ≥ H). Davies and Milley (2026) leave it open whether blocking games are.
+- McKay, Milley, Nowakowski and Santos claim the dead-ending universe is pocancellative ($G + X \ge H + X$ implies $G \ge H$). Davies and Milley (2026) leave it open whether blocking games are.
 - Siegel (2023 preprint) built uncountably many dead-ending universes with distinct order relations.
 
 **Research questions.**

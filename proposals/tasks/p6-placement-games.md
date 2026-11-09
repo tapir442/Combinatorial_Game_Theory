@@ -44,5 +44,5 @@
 
 - [ ] **6.14 Obstruction techniques, E19** (4 wk). General methods for showing that
   values cannot occur.  Start from the proof that COL has nim-dimension 1.
-- [ ] **6.15 Domineering: boiling point 2 and nim-dimension 1** (*open*, headline).
+- [ ] **6.15 Domineering: boiling point 2 and no ∗4** (*open*, headline).
   *Needs:* 6.5, 6.6, 6.14

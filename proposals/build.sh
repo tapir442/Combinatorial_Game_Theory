@@ -13,6 +13,8 @@ opts=(
   -V geometry:a4paper -V geometry:margin=2.3cm -V fontsize=10pt
   -V colorlinks=true -V linkcolor=blue -V urlcolor=blue
   -V date="9 November 2026"
+  --lua-filter=tex/math-fence.lua   # ```math blocks (GitHub syntax) -> display math
+  -H tex/macros.tex                 # \lt, \gt (GitHub-safe < and >)
 )
 
 # Sources section (shared by every single-proposal PDF)

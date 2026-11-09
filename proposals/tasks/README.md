@@ -6,7 +6,7 @@ directly on GitHub.
 
 | Proposal | File | Tasks | Fastest first result |
 |---|---|---|---|
-| 1 Octal periodicity | [p1-octal-periodicity.md](p1-octal-periodicity.md) | 18 | Ward's formula, case c = a + b, for small a |
+| 1 Octal periodicity | [p1-octal-periodicity.md](p1-octal-periodicity.md) | 19 | Ward's formula, case c = a + b, for small a |
 | 2 Misère algebra | [p2-misere-algebra.md](p2-misere-algebra.md) | 16 | Classifying misère quotients beyond order 18 |
 | 3 Loopy temperature | [p3-loopy-temperature.md](p3-loopy-temperature.md) | 14 | Formal proof of Sentestrat |
 | 4 Complexity | [p4-complexity.md](p4-complexity.md) | 15 | Wolfe's sums of switches (E3) |
