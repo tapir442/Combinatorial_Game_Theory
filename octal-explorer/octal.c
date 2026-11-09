@@ -48,6 +48,8 @@
 #include <unistd.h>
 #include <zlib.h>
 
+#include "octal.h"
+
 #define MAXDIG 64
 
 enum { SP_NONE, SP_GRUNDY, SP_COUPLES };

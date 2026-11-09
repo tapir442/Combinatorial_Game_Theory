@@ -6,3 +6,4 @@ __pycache__/
 /octal
 python/octalgames/liboctal.so
 out_*/
+site/

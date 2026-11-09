@@ -133,6 +133,22 @@ class NimSequence:
 
         Runs in chunks, so a Jupyter interrupt (Kernel > Interrupt) stops the
         computation cleanly and keeps the values computed so far.
+
+        Parameters
+        ----------
+        n
+            New total length.  Nothing happens if ``n <= len(self)``.
+        progress
+            Show a progress bar (an ipywidgets bar in Jupyter, otherwise text on
+            stderr) when more than 20,000 values are computed.
+        chunk_seconds
+            Target duration of one C call.  Smaller values make interrupts more
+            responsive.
+
+        Returns
+        -------
+        NimSequence
+            ``self``, so calls can be chained.
         """
         start = len(self._G)
         if n <= start:
@@ -223,10 +239,28 @@ class NimSequence:
 
     def image(self, width: int, mode: str = "values", *, start: int = 0, rows: Optional[int] = None,
               bit: int = 0, threshold: int = 1, cell: int = 1) -> np.ndarray:
-        """RGB image (uint8) of the wrapped sequence.
+        """RGB image (uint8, shape ``(rows*cell, width*cell, 3)``) of the wrapped sequence.
 
-        mode: 'values' (palette colour), 'diff' (dark where G(n) != G(n-width)),
-        'zero' (P-positions black), 'bit' (bit `bit` of G(n)), 'ge' (only values >= threshold).
+        Parameters
+        ----------
+        width
+            Values per row.  Row r, column c shows G(start + r*width + c).
+        mode
+            ``'values'``: palette colour per value (0 is near-black).
+            ``'diff'``: dark red where G(n) != G(n - width), grey in the first row.
+            ``'zero'``: P-positions (G = 0) black.
+            ``'bit'``: bit ``bit`` of G(n) black.
+            ``'ge'``: only values >= ``threshold`` coloured.
+        start
+            First heap size shown.
+        rows
+            Number of rows (default: all remaining values).
+        bit
+            Bit index for ``mode='bit'``.
+        threshold
+            Threshold for ``mode='ge'``.
+        cell
+            Pixel size of one value (nearest-neighbour upscaling).
         """
         A = self.wrap(width, start, rows)
         H, W = A.shape
@@ -316,12 +350,48 @@ class NimSequence:
 
 
 def compute(code: str, n: int, **kw) -> NimSequence:
-    """Compute G(0..n-1) for `code` ('.007', '0.6', '4.', 'grundy', 'couples', ...)."""
+    """Compute G(0), ..., G(n-1) for a game.
+
+    Parameters
+    ----------
+    code
+        Game code: ``'.007'``, ``'0.6'``, ``'.137'``, ``'4.'``, ``'.f6'``, or the
+        named rules ``'grundy'`` and ``'couples'``.  See the *Concepts* page.
+    n
+        Number of heap sizes.
+    **kw
+        Passed to :meth:`NimSequence.extend` (``progress``, ``chunk_seconds``).
+
+    Returns
+    -------
+    NimSequence
+
+    Examples
+    --------
+    >>> import octalgames as og
+    >>> og.compute(".77", 300).period          # Kayles
+    Period(preperiod=71, period=12, proven=True)
+    """
     return NimSequence(code, n, **kw)
 
 
 def octal_codes(digits: int, *, max_digit: int = 7, include_d0: bool = False) -> list:
-    """All codes .d1...dk with k = digits and last digit nonzero (max_digit 15 = hexadecimal)."""
+    """List the game codes with a given number of digits.
+
+    Parameters
+    ----------
+    digits
+        Number of digits after the point.  The last digit is always nonzero.
+    max_digit
+        Largest digit: 7 for octal games, 15 for hexadecimal games.
+    include_d0
+        Also return variants with a digit before the point (4, plus 8 and c in hex).
+
+    Examples
+    --------
+    >>> og.octal_codes(1)
+    ['.1', '.2', '.3', '.4', '.5', '.6', '.7']
+    """
     sym = "0123456789abcdef"[: max_digit + 1]
     out = [""]
     for _ in range(digits):
@@ -333,7 +403,23 @@ def octal_codes(digits: int, *, max_digit: int = 7, include_d0: bool = False) ->
 
 
 def survey(codes: Iterable[str], n: int = 5000, *, progress: bool = False):
-    """Compute many games and return a pandas DataFrame of their summaries."""
+    """Compute many games and return a pandas DataFrame of their summaries.
+
+    Parameters
+    ----------
+    codes
+        Game codes, for example ``og.octal_codes(2)``.
+    n
+        Heap sizes per game.
+    progress
+        Show a progress bar per game.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Indexed by code, with the columns of :meth:`NimSequence.summary`:
+        ``name, n, period, preperiod, proven, max_value, max_at, p_positions, seconds``.
+    """
     import pandas as pd
     rows = []
     for c in codes:

@@ -1,0 +1,102 @@
+# Concepts
+
+## Take-and-break games and nim-values
+
+A position is a collection of heaps of beans.  A move picks one heap, removes some
+beans from it, and may split what is left into several heaps.  The player who cannot
+move loses (normal play).
+
+By the Sprague–Grundy theorem, each heap of size \(n\) is equivalent to a Nim heap of
+size \(G(n)\), its **nim-value**:
+
+\[
+G(n) = \operatorname{mex}\{\, G(a_1) \oplus \dots \oplus G(a_j) : (a_1,\dots,a_j) \text{ reachable from } n \,\}
+\]
+
+Here mex is the smallest non-negative integer not in the set, and \(\oplus\) is XOR.  A
+sum of heaps is a second-player win (a P-position) exactly when the XOR of their
+nim-values is 0.  The sequence \(G(0), G(1), \dots\) is the **nim-sequence**.
+
+## Game codes
+
+| Code | Meaning |
+|---|---|
+| `.d1d2d3…` | Digit \(d_k\) (hexadecimal) says what may happen when \(k\) beans are removed |
+| bit 0 (1) of \(d_k\) | allowed to leave **no** heap (remove a whole heap of size \(k\)) |
+| bit 1 (2) | allowed to leave **one** nonempty heap |
+| bit 2 (4) | allowed to leave **two** nonempty heaps |
+| bit 3 (8) | allowed to leave **three** nonempty heaps (hexadecimal games) |
+| `d0.…` | digit before the point: split without removing (bits 2 and 3 only) |
+| `grundy` | Grundy's game: split one heap into two **unequal** heaps |
+| `couples` | Couples-are-forever: split any heap into two, except a heap of 2 |
+
+Examples:
+
+| Code | Game | Status |
+|---|---|---|
+| `.77` | Kayles | period 12, preperiod 71 |
+| `.07` | Dawson's Kayles | period 34, preperiod 53 |
+| `.137` | Dawson's chess | period 34 |
+| `.6` | Officers | **open** |
+| `.007` | Treblecross (one-dimensional tic-tac-toe) | **open** |
+| `.3303` | subtraction game S{1, 2, 4} | period 3 |
+| `4.` | split any heap into two | |
+
+!!! tip "Subtraction games"
+    The subtraction game with set \(S\) is the octal game with digit 3 at every position
+    \(s \in S\) and 0 elsewhere.  For example \(S = \{1, 3, 4\}\) is `.3033`.
+
+## Periods: proved and apparent
+
+A sequence has **period \(p\) and preperiod \(i\)** if \(G(n+p) = G(n)\) for all
+\(n \ge i\).
+
+The **octal periodicity theorem** (Guy and Smith; *Winning Ways*, ch. 4): let \(t\) be
+the position of the last nonzero digit.  If
+
+\[
+G(n + p) = G(n) \quad\text{for all } i \le n < 2i + p + t,
+\]
+
+then the sequence has period \(p\) from \(i\) on, forever.  So finitely many values
+prove periodicity.
+
+octal-explorer reports:
+
+- **proved** when the computed range contains enough values for the theorem
+  (\(N \ge 2i + 2p + t\)).  This is claimed only for plain octal codes: no digit before
+  the point, no hexadecimal digits ≥ 8, no named rules.
+- **apparent** when the smallest \(p\) repeats at least three times at the end of the
+  data (\(N - i \ge 3p\)) but the theorem does not apply or needs more values.
+- **none** otherwise.
+
+!!! warning
+    "No period found" only means that none is visible within the computed range.
+    Some solved games have enormous periods: `.106` has preperiod 465,384,263,797 and
+    period 328,226,140,474.
+
+## Reading the pictures
+
+| Picture | What it shows | What to look for |
+|---|---|---|
+| **values** | \(G(n)\) against \(n\); new record values in red | bounded values suggest periodicity; growing bands (as in `.007`) are structure in an aperiodic-looking game |
+| **wrap** | rows of \(W\) consecutive values; colour = value, 0 near-black | when \(W\) is a period or a multiple of one, the picture becomes **vertical stripes** |
+| **diff** | dark where \(G(n) \ne G(n-W)\) | when \(W\) is a period, the picture is **blank below the preperiod**; the last dark cell is the last exception |
+| **autocorrelation** | for lag \(p\), the fraction of \(n\) in the second half with \(G(n) = G(n+p)\) | peaks at candidate periods; near-misses show "almost periods" |
+| **histogram** | how often each value occurs (log scale) | rare values; the gaps used by the rare/common-value method |
+| **bit planes** (explorer) | bit \(b\) of \(G(n)\) | regularities in individual bits often appear before full periodicity |
+
+The colour of value \(v > 0\) has hue \(v \cdot 0.618034 \bmod 1\) (the golden-ratio
+step), saturation 0.70 and value 0.92.  Value 0 is \((25, 25, 35)\).  The C program, the
+HTML explorer and the Python package all use the same palette.
+
+## Algorithm and cost
+
+The nim-value of \(n\) is a mex over all options.  Two-heap moves give about \(n/2\)
+options per removal, so computing \(N\) values costs \(O(N^2)\).  On one core that is
+roughly 6 s for \(N = 200{,}000\) of `.6` or `.007`.  Hexadecimal (three-heap) moves cost
+\(O(n^2)\) per heap size.
+
+The command-line program also has an experimental `--sparse` mode: a rare/common-value
+split by the parity of `popcount(v & mask)`.  It is verified against brute force but is
+not faster on the games tested.  See [Internals](c-internals.md#the-sparse-mode).

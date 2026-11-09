@@ -1,7 +1,7 @@
 """ctypes binding to the C backend (octal.c compiled with -DOCTAL_NO_MAIN).
 
 The shared library is looked up next to this file.  If it is missing, or if
-octal.c is newer than it, it is (re)compiled automatically with $CC (default cc).
+octal.c or octal.h is newer than it, it is (re)compiled automatically with $CC (default cc).
 Set OCTALGAMES_LIB to use a library somewhere else.
 """
 from __future__ import annotations
@@ -40,7 +40,9 @@ def load():
     path = Path(os.environ.get("OCTALGAMES_LIB", _HERE / "liboctal.so"))
     src = next((s for s in _SOURCES if s.exists()), None)
     if "OCTALGAMES_LIB" not in os.environ and src is not None:
-        if not path.exists() or src.stat().st_mtime > path.stat().st_mtime:
+        hdr = src.with_name("octal.h")
+        newest = max(src.stat().st_mtime, hdr.stat().st_mtime if hdr.exists() else 0)
+        if not path.exists() or newest > path.stat().st_mtime:
             _build(src, path)
     if not path.exists():
         raise BackendError(f"{path} not found and octal.c not available to build it")

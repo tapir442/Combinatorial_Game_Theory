@@ -1,0 +1,63 @@
+site_name: octal-explorer
+site_description: Compute and visualise nim-sequences of octal games (C backend, Python/Jupyter front end)
+repo_url: https://github.com/tapir442/Combinatorial_Game_Theory
+edit_uri: edit/main/octal-explorer/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle: { icon: material/brightness-7, name: Dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle: { icon: material/brightness-4, name: Light mode }
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Concepts: concepts.md
+  - C:
+      - Command line: c-cli.md
+      - Library API: c-api.md
+      - Internals: c-internals.md
+  - Python:
+      - User guide: python-guide.md
+      - API reference: python-api.md
+  - Benchmark vs CGSuite: benchmark.md
+  - Development: development.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [python]
+          options:
+            docstring_style: numpy
+            show_source: false
+            members_order: source
+            show_root_heading: true
+            show_signature_annotations: true
+            separate_signature: true
+            merge_init_into_class: true
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc: { permalink: true }
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.arithmatex: { generic: true }
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js

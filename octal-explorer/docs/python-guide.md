@@ -1,0 +1,101 @@
+# Python user guide
+
+```python
+import octalgames as og
+```
+
+## Computing
+
+```python
+s = og.compute(".007", 100_000)     # NimSequence
+s.extend(300_000)                    # continue later; existing values are kept
+```
+
+- The work runs in the C library in chunks of about 0.3 s, with a progress bar in
+  Jupyter.
+- **Kernel → Interrupt** stops the computation cleanly and keeps the values computed
+  so far.
+- Save and resume:
+
+```python
+s.save_csv("treblecross.csv")
+s = og.NimSequence.from_csv(".007", "treblecross.csv").extend(1_000_000)
+```
+
+## Looking at the data
+
+```python
+s.values          # read-only numpy uint16 array
+s[1000:1010]      # slicing works like an array
+len(s), s.max_value
+s.period          # Period(preperiod, period, proven) or None
+s.records()       # [(n, value), ...] where a new maximum first appears
+s.counts()        # counts[v]
+s.first_occurrence()
+s.p_positions()   # heap sizes with G = 0
+s.autocorr(1000)  # a[p] = match fraction at lag p (second half of the data)
+s.best_lag()
+s.wrap(W)         # 2-D array, -1 padding at the end
+s.summary()       # dict; s.to_frame() gives a pandas DataFrame
+```
+
+In Jupyter, evaluating `s` shows a summary table.
+
+## Plots (matplotlib)
+
+All plot functions are also methods and accept `ax=` to draw into your own figure.
+
+```python
+s.plot_values()                      # G(n) with record values
+s.plot_wrap()                        # width = period or best lag
+s.plot_wrap(34, mode="diff", rows=100)
+s.plot_wrap(64, mode="bit", bit=3)
+s.plot_wrap(256, mode="ge", threshold=512)
+s.plot_autocorr(2000)
+s.plot_histogram()
+og.plot_first_occurrence(s)
+s.dashboard()                        # all in one figure
+```
+
+`mode` is one of `values`, `diff`, `zero` (P-positions), `bit` or `ge` (threshold).  See
+[Concepts](concepts.md#reading-the-pictures).
+
+## Interactive explorer
+
+```python
+s.explore()          # or og.explore(s, width=12)
+```
+
+| Control | Effect |
+|---|---|
+| width W (box and slider) | values per row |
+| −1 / +1 / ×2 / ÷2 | step through widths; stripes appear at periods |
+| period / best lag | jump to the detected period or the best lag |
+| start n, jump to end | which part of the sequence to show (`jump to end` shows the tail, where periodicity lives) |
+| cell px | zoom |
+| mode, bit / thr | values, diff, P-positions, bit plane, values ≥ threshold |
+
+The status line counts the cells with \(G(n) \ne G(n-W)\) in view and shows the last
+one.  In `diff` mode at a true period, this is the last exception.
+
+## Surveys
+
+```python
+codes = og.octal_codes(2)                    # '.01' ... '.77' with last digit nonzero
+df = og.survey(codes, 2000)                  # DataFrame indexed by code
+df[df.period.isna()]                         # no period visible
+og.survey(og.octal_codes(1, max_digit=15), 3000)   # one-digit hexadecimal games
+```
+
+## Colours
+
+```python
+og.palette(20)        # (21, 3) uint8 lookup table, same as the C program
+og.colormap(20)       # matplotlib ListedColormap
+```
+
+## Threads and processes
+
+Calls into C are serialised with a lock.  To use several cores, run games in separate
+processes (`concurrent.futures.ProcessPoolExecutor`).  Each process loads its own copy of
+the library.

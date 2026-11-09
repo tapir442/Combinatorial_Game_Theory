@@ -4,12 +4,16 @@ Compute and visualise nim-sequences of octal and hexadecimal take-and-break game
 a C program (`octal`) with PNG and HTML output, plus a Python package
 (`octalgames`) that uses the same C code as its backend in JupyterLab.
 
+Full documentation (C command line, C library API, internals, Python guide and API
+reference) is in `docs/`.  Read it as a website with `make docs`, which serves it at
+http://127.0.0.1:8000.
+
 ## Setup (uv)
 
 ```sh
 make            # builds ./octal and python/octalgames/liboctal.so (needs gcc + zlib)
 uv sync --extra jupyter   # creates .venv with numpy, matplotlib, ipywidgets, pandas, jupyterlab
-uv run pytest             # tests: C backend vs a pure-Python reference, known periods
+uv run pytest             # 17 tests: C vs a pure-Python reference, known periods, doc examples
 uv run jupyter lab notebooks/explore_octal_games.ipynb
 ```
 
@@ -66,6 +70,13 @@ in a browser.
 - **autocorrelation**: fraction of the second half with G(n) = G(n+p).  Peaks point to
   candidate periods.
 - **histogram**: value frequencies on a log scale.  Short bars are rare values.
+
+## Benchmark
+
+octal-explorer is about 13× faster than CGSuite 2.1.1 on octal games and about 20× faster
+on Grundy's game and hexadecimal games, with identical results.  For example, 200,000
+values of `.007` take 5.6 s against 73 s.  See `docs/benchmark.md` and
+`benchmarks/results/`.  Rerun with `make bench`.
 
 ## Notes
 

@@ -25,6 +25,11 @@ dev = [
     "ipykernel>=6",
 ]
 
+docs = [
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.26",
+]
+
 [build-system]
 requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
@@ -40,4 +45,5 @@ octalgames = ["liboctal.so"]
 default-groups = ["dev"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "python/octalgames"]
+addopts = "--doctest-modules"

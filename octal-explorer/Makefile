@@ -6,12 +6,12 @@ LIB     = python/octalgames/liboctal.so
 
 all: octal $(LIB)
 
-octal: octal.c
+octal: octal.c octal.h
 	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)
 
 # shared library used by the Python package (octalgames)
 lib: $(LIB)
-$(LIB): octal.c
+$(LIB): octal.c octal.h
 	$(CC) $(CFLAGS) -Wno-unused-function -shared -fPIC -DOCTAL_NO_MAIN -o $@ $< $(LDLIBS)
 
 # Sanity checks: sparse vs brute force, and known periods
@@ -38,4 +38,21 @@ pytest: venv
 lab: venv
 	uv run jupyter lab notebooks/explore_octal_games.ipynb
 
-.PHONY: all lib test clean venv pytest lab
+# documentation (MkDocs): serve on http://127.0.0.1:8000, or build into site/
+docs: lib
+	uv sync --extra jupyter --group docs
+	uv run mkdocs serve
+
+docs-build: lib
+	uv sync --extra jupyter --group docs
+	uv run mkdocs build --strict
+
+# benchmark against CGSuite (CGSUITE=path to the installation, default ~/CGSuite)
+CGSUITE ?= $(HOME)/CGSuite
+bench: lib
+	uv run python benchmarks/bench_cgsuite.py --cgsuite $(CGSUITE)
+
+bench-quick: lib
+	uv run python benchmarks/bench_cgsuite.py --cgsuite $(CGSUITE) --quick --out /tmp/octal-bench-quick
+
+.PHONY: all lib test clean venv pytest lab docs docs-build bench bench-quick

@@ -1,0 +1,52 @@
+# Development
+
+## Layout
+
+```text
+octal-explorer/
+├── octal.c                  C: rules, mex kernel, period search, PNG/HTML output, CLI
+├── octal.h                  public C API of the library
+├── Makefile                 octal, lib, test, venv, pytest, lab
+├── pyproject.toml           uv project (package octalgames)
+├── uv.lock
+├── python/octalgames/
+│   ├── _lib.py              ctypes binding, auto-build of liboctal.so
+│   ├── core.py              NimSequence, Period, compute, survey, palette
+│   ├── plot.py              matplotlib plots (attached as NimSequence methods)
+│   └── widgets.py           ipywidgets explorer
+├── tests/test_octalgames.py
+├── notebooks/explore_octal_games.ipynb
+├── docs/                    this documentation (MkDocs)
+└── mkdocs.yml
+```
+
+## Tests
+
+```sh
+make test          # C: sparse vs brute on 5 games, Kayles and Dawson's Kayles periods
+uv run pytest      # Python: C backend vs a pure-Python reference on 7 codes,
+                   # periods, extend == one shot, Grundy's game, wrap/image, survey
+```
+
+The pure-Python reference in `tests/test_octalgames.py` (`brute`) is the independent
+check.  Compare new rule types against it too.
+
+## Adding a rule type
+
+Example: Pulleyblank's "split only heaps larger than h" (task 1.15).
+
+1. Add an `SP_…` constant and accept a name in `parse_rule`.  If the rule has a
+   parameter, parse it from the code (for example `split>3`).
+2. Restrict moves in `pair_allowed` (two-heap splits) or `mark_simple`.
+3. Make sure `find_period` does not claim a proof: `can_prove` already requires
+   `special == SP_NONE`.
+4. Add a reference implementation and a test in `tests/`.
+5. Document the code syntax in `octal.h` and in `docs/concepts.md`.
+
+## Releasing documentation
+
+```sh
+uv run mkdocs build --strict    # fails on broken links or references
+```
+
+The site goes to `site/`, which is git-ignored.
