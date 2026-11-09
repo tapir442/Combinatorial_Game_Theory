@@ -24,12 +24,12 @@
  *   index.html      gallery + interactive wrap explorer (open in a browser)
  *
  * Algorithm: the default is a tight brute-force mex over all options
- * (O(n) per heap size for two-heap moves).  --sparse enables an experimental
+ * (O(n) per heap size for two-heap moves).  `--sparse` enables an experimental
  * rare/common variant: values are split by the parity of popcount(v & mask);
  * a rare XOR needs exactly one rare heap, so rare reachable values come from
  * the few rare heaps, and the pair scan stops once the smallest missing value
  * is rare.  Proving that a *common* value is unreachable still needs a full
- * scan, so on .6 and .007 it is not faster.  --check compares both methods.
+ * scan, so on .6 and .007 it is not faster.  `--check` compares both methods.
  *
  * Build with -DOCTAL_NO_MAIN -shared -fPIC for the library used by the Python
  * package (functions octal_rule_name, octal_extend, octal_period; see octal.h).
@@ -94,7 +94,7 @@ typedef struct {
     int found, proven;   /**< found: a period was detected; proven: certified by the theorem */
 } Period;
 
-/** Suppress progress and summary output (-q). */
+/** Suppress progress and summary output (`-q`). */
 static int quiet = 0;
 
 /** Print "octal: msg" to stderr and exit with status 1. */
@@ -306,7 +306,7 @@ static unsigned grundy_brute(const Rule *R, const uint16_t *G, long n, long long
  * 2. Scans all pairs, tracking the current mex `lo`; stops as soon as `lo` is
  *    rare, because every rare reachable value is already marked.
  *
- * Gives the same result as grundy_brute() (checked by --check), but is not
+ * Gives the same result as grundy_brute() (checked by `--check`), but is not
  * faster on games whose nim-values are mostly common.
  *
  * @param R      rule
@@ -1041,8 +1041,8 @@ static void usage(void) {
 /**
  * @brief Command-line program: compute, analyse and write all output files.
  *
- * Steps: parse options and the code; compute(); optionally --check against
- * brute force or -p print; statistics (max value, histogram, records);
+ * Steps: parse options and the code; compute(); optionally `--check` against
+ * brute force or `-p` print; statistics (max value, histogram, records);
  * find_period(); autocorrelation and best lag; choose the wrap width; write
  * values.csv, the PNG plots, index.html and summary.txt.  See usage().
  */
