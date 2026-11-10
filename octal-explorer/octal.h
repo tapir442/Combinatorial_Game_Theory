@@ -32,7 +32,7 @@
  *   from = number of values already known (the Python NimSequence does this).
  * - The library never exits the process; errors are reported as return codes.
  * - Return codes: 0 = success, -1 = the code does not parse, -2 = a value
- *   exceeds 65535, -3 = out of memory.
+ *   exceeds 65535, -3 = out of memory, -4 = no usable GPU (GPU functions only).
  */
 #ifndef OCTAL_H
 #define OCTAL_H
@@ -69,6 +69,64 @@ int octal_rule_name(const char *code, char *name, int len);
  *         On -2 and -3, G is valid up to the heap size where it stopped.
  */
 int octal_extend(const char *code, uint16_t *G, long from, long to);
+
+/**
+ * @brief Like octal_extend(), but with the blocked, multi-threaded method.
+ *
+ * Heap sizes are processed in blocks [n0, n0+B), B ~ n0/32.  The two-heap
+ * options whose heaps both lie below n0 (almost all the work) are scanned in
+ * parallel with OpenMP; the few options involving heaps of the block itself
+ * are added sequentially.  Gives exactly the same values as octal_extend().
+ * Heap sizes below 4096 and three-heap (hexadecimal) options are computed
+ * sequentially, so small n and hexadecimal codes do not get faster.
+ *
+ * Without OpenMP (library not built with -fopenmp) it runs in one thread; it
+ * is then still somewhat faster than octal_extend() thanks to cache tiling.
+ * Reentrant like octal_extend(): every call starts its own thread team.
+ *
+ * @param code     game code
+ * @param G        array of at least @p to entries; G[0..from) must be valid
+ * @param from     first heap size to compute
+ * @param to       one past the last heap size to compute
+ * @param threads  number of threads; <= 0 uses all cores (OMP_NUM_THREADS)
+ * @return 0, -1 (bad code), -2 (value > 65535) or -3 (out of memory).
+ *         On -2 and -3, G is valid up to the heap size where it stopped.
+ */
+int octal_extend_blocked(const char *code, uint16_t *G, long from, long to, int threads);
+
+/**
+ * @brief Like octal_extend_blocked(), but with the parallel scan on the GPU.
+ *
+ * Each block's two-heap options below the block are scanned by a Vulkan
+ * compute shader (one workgroup per heap); the rest of the block is finished on
+ * one CPU core.  Heap sizes below 32768 are computed with
+ * octal_extend_blocked() on all CPU cores.  Gives exactly the same values as
+ * octal_extend().
+ *
+ * Needs a library built with -DOCTAL_VULKAN and linked with -lvulkan, and a
+ * Vulkan GPU (CPU implementations such as llvmpipe are only used when the
+ * environment variable OCTAL_GPU_ALLOW_CPU is set).  The Vulkan device is
+ * created on the first call and kept; calls from several threads are
+ * serialised (one at a time on the GPU).
+ *
+ * @param code  game code
+ * @param G     array of at least @p to entries; G[0..from) must be valid
+ * @param from  first heap size to compute
+ * @param to    one past the last heap size to compute
+ * @return 0, -1 (bad code), -2 (value > 65535), -3 (out of memory) or
+ *         -4 (no usable GPU, not built with Vulkan, or a Vulkan error).
+ *         On -2 and -3, G is valid up to the heap size where it stopped.
+ */
+int octal_extend_gpu(const char *code, uint16_t *G, long from, long to);
+
+/**
+ * @brief Name of the GPU that octal_extend_gpu() uses.
+ *
+ * @param name  output buffer (NUL-terminated, truncated to @p len)
+ * @param len   size of @p name in bytes
+ * @return 0, or -4 if there is no usable GPU (or no Vulkan support built in)
+ */
+int octal_gpu_name(char *name, int len);
 
 /**
  * @brief Search for an eventual period of G[0..N).

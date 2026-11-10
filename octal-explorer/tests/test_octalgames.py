@@ -159,3 +159,43 @@ def test_austin_theorem_examples():
     # saltus not a power of 2 -> Austin's theorem cannot apply: .3F is 012012(+3) (Kenyon)
     p = og.compute(".3f", 2000, progress=False).period
     assert (p.period, p.saltus, p.proven) == (6, 3, False)
+
+
+@pytest.mark.parametrize("code", [".007", ".6", ".77", "grundy", "couples", "4.07", ".f6"])
+def test_blocked_equals_brute(code):
+    """The blocked multi-threaded method gives exactly the brute-force values,
+    also when computed in many small chunks that cut through blocks."""
+    n = 3000 if code == ".f6" else 30000
+    a = og.compute(code, n, progress=False)
+    b = og.compute(code, n, progress=False, method="blocked")
+    c = og.compute(code, n, progress=False, method="blocked", threads=3, chunk_seconds=0.0005)
+    assert np.array_equal(a.values, b.values)
+    assert np.array_equal(a.values, c.values)
+
+
+def test_blocked_extend_and_override():
+    s = og.compute(".007", 10000, progress=False, method="blocked", threads=2)
+    s.extend(20000, progress=False, method="brute")
+    s.extend(25000, progress=False)
+    assert s.method == "blocked"
+    assert np.array_equal(s.values, og.compute(".007", 25000, progress=False).values)
+
+
+def test_bad_method():
+    with pytest.raises(ValueError):
+        og.compute(".007", 10, method="cuda")
+
+
+@pytest.mark.skipif(og.gpu_name() is None, reason="no Vulkan GPU / built without Vulkan")
+@pytest.mark.parametrize("code", [".007", ".6", "grundy", "couples", "4.07"])
+def test_gpu_equals_brute(code):
+    n = 60000
+    a = og.compute(code, n, progress=False)
+    b = og.compute(code, n, progress=False, method="gpu", chunk_seconds=0.01)
+    assert np.array_equal(a.values, b.values)
+
+
+def test_gpu_unavailable_raises_or_works():
+    if og.gpu_name() is None:
+        with pytest.raises(RuntimeError):
+            og.compute(".007", 40000, progress=False, method="gpu")

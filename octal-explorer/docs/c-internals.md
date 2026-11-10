@@ -42,6 +42,55 @@ apart from the command-line flag `quiet`, so the library is thread-safe.
 - The size of `seen` grows as values grow (`ensure_seen`).  The table stays twice the
   smallest power of two above the largest value, so every XOR of values fits.
 
+## The blocked mode
+
+`extend_blocked` (CLI `--blocked`, library `octal_extend_blocked`) computes a block of
+heap sizes \([n_0, n_0+B)\) together, with \(B \approx n_0/32\) (at most 65536, and at most
+64 MB of marks).  For a pair \(a + b = m\) with \(a < b\):
+
+- if \(b < n_0\), both values are known before the block starts.  `block_scan` marks all
+  these pairs for all heaps of the block **in parallel** (OpenMP).  Each thread owns a range of
+  heaps and its own rows of a byte array `marks[B][vcap]`, so there are no atomics.  It walks
+  \(a\) in tiles of 4096, so that `G[a]` and `G[m-a]` stay in cache across its heaps.
+- if \(b \ge n_0\), then \(a = m - b < B\).  `block_finish` adds these few pairs, the pair
+  \(a = b\) and all 0-, 1- and 3-heap options (`mark_simple`) **sequentially**, in order of
+  \(n\).  It then takes the mex over the `marks` row and the stamp table.
+
+The sequential part is about \(B/n_0 \approx 1/32\) of the pair work.  Heap sizes below 4096 use
+`grundy_brute`.  Three-heap (hexadecimal) options stay sequential, so hexadecimal codes do not
+get faster.  Without `-fopenmp` the pragma is ignored and the mode runs in one thread.
+
+Measured on `.007`, \(N = 10^6\), 12 cores / 24 threads: brute force 143 s; blocked with 1
+thread 80 s (cache tiling alone), 4 threads 23 s, 12 threads 10.3 s, 24 threads 9.5 s.
+`--blocked --check` and `make test` compare it with brute force.
+
+## The GPU mode
+
+`extend_gpu` (CLI `--gpu`, library `octal_extend_gpu`) is the blocked mode with `block_scan`
+replaced by the Vulkan compute shader `octal_gpu.comp`:
+
+- one workgroup of 256 invocations per heap of the block.  They stride over \(a\) and OR the
+  values \(G(a) \oplus G(m-a)\) into a bitset in shared memory (they read the bit first, so the
+  few, heavily hit words see few atomics).  The bitset is then written to a marks buffer;
+- `block_finish` (with `bitset = 1`) completes the block on one CPU core, as before.  Blocks are
+  smaller (\(B \approx n_0/128\)), because the GPU waits during this sequential part;
+- heap sizes below 32768 are computed by `extend_blocked` on all CPU cores;
+- the nim-values live in one host-visible buffer (two `uint16` per `uint32`).  The CPU appends
+  each finished block to it.  This needs no copies on integrated GPUs and on discrete GPUs with
+  resizable BAR; on other discrete GPUs the shader reads over PCIe, and a staging buffer would
+  be the next step.
+
+The Vulkan device and pipeline are created on first use (`gpu_init`) and kept; a mutex
+serialises GPU calls.  CPU devices (llvmpipe) are skipped unless `OCTAL_GPU_ALLOW_CPU` is set.
+The shader is compiled to SPIR-V by `make spv` and embedded as `octal_gpu_spv.h` (committed,
+so building needs only the Vulkan headers and `libvulkan`).  The code is compiled only with
+`-DOCTAL_VULKAN`; otherwise the GPU functions return −4.
+
+Measured on `.007`, \(N = 10^6\), with the only GPU of the test machine, the integrated Radeon of
+a Ryzen 9 7900X (2 compute units): 23.6 s.  That is 3.3× one CPU core (79 s) but slower than
+`--blocked` on all 24 threads (9.8 s).  A discrete GPU has 20–100× more compute units.
+`--gpu --check`, `make test-gpu` and the GPU tests in pytest compare it with brute force.
+
 ## The sparse mode
 
 `grundy_sparse` implements a rare/common split.  Value \(v\) is *rare* if

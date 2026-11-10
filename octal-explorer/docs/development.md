@@ -23,8 +23,11 @@ octal-explorer/
 ## Tests
 
 ```sh
-make test          # C: sparse vs brute on 5 games, Kayles and Dawson's Kayles periods,
+make test          # C: sparse and blocked vs brute force, Kayles and Dawson's Kayles periods,
                    # and test-threads (8 threads under ThreadSanitizer vs sequential)
+make test-gpu      # C: --gpu vs brute force on 6 games (needs a Vulkan GPU)
+make spv           # recompile octal_gpu.comp into octal_gpu_spv.h after changing the shader
+                   # (needs glslangValidator: apt install glslang-tools)
 uv run pytest      # Python: C backend vs a pure-Python reference on 7 codes,
                    # periods, extend == one shot, Grundy's game, wrap/image, survey,
                    # threads (same results, real parallel speed-up), doc examples

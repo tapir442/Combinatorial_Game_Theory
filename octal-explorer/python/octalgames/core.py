@@ -127,11 +127,28 @@ class NimSequence:
     - :attr:`period` is cached and reset whenever :meth:`extend` adds values.
     - Nothing is shared between instances or saved to disk: two
       ``NimSequence(".007", n)`` objects each compute from scratch.
+
+    Methods
+    -------
+    ``method="brute"`` (default) computes one heap size after another on one
+    core.  ``method="blocked"`` computes blocks of heap sizes with ``threads``
+    threads (0 = all cores); it gives the same values and is much faster for
+    large n (not for hexadecimal codes).  ``method="gpu"`` does the parallel part
+    on a Vulkan GPU (see :func:`octalgames.gpu_name`).  The choice is stored and
+    used by later :meth:`extend` calls unless they pass their own.
+
+    >>> NimSequence(".007", 20000, method="blocked", progress=False).method
+    'blocked'
     """
 
-    def __init__(self, code: str, n: int = 0, *, progress: bool = True, chunk_seconds: float = 0.3):
+    def __init__(self, code: str, n: int = 0, *, progress: bool = True, chunk_seconds: float = 0.3,
+                 method: str = "brute", threads: int = 0):
+        if method not in _lib.METHODS:
+            raise ValueError(f"method must be one of {_lib.METHODS}, not {method!r}")
         self.code = code
         self.name = _lib.rule_name(code)
+        self.method = method
+        self.threads = threads
         self._G = np.zeros(0, dtype=np.uint16)
         self.seconds = 0.0
         self._period_cache = None
@@ -160,7 +177,8 @@ class NimSequence:
         return int(self._G.max()) if len(self._G) else 0
 
     # ---- computation
-    def extend(self, n: int, *, progress: bool = True, chunk_seconds: float = 0.3) -> "NimSequence":
+    def extend(self, n: int, *, progress: bool = True, chunk_seconds: float = 0.3,
+               method: Optional[str] = None, threads: Optional[int] = None) -> "NimSequence":
         """Compute values up to heap size n-1 (keeps what is already there).
 
         Runs in chunks, so a Jupyter interrupt (Kernel > Interrupt) stops the
@@ -176,12 +194,22 @@ class NimSequence:
         chunk_seconds
             Target duration of one C call.  Smaller values make interrupts more
             responsive.
+        method
+            ``"brute"``, ``"blocked"`` or ``"gpu"``; default: the instance's
+            :attr:`method`.
+        threads
+            Threads for ``"blocked"`` (0 = all cores); default: the instance's
+            :attr:`threads`.
 
         Returns
         -------
         NimSequence
             ``self``, so calls can be chained.
         """
+        method = self.method if method is None else method
+        threads = self.threads if threads is None else threads
+        if method not in _lib.METHODS:
+            raise ValueError(f"method must be one of {_lib.METHODS}, not {method!r}")
         start = len(self._G)
         if n <= start:
             return self
@@ -194,7 +222,7 @@ class NimSequence:
             while done < n:
                 stop = min(n, done + chunk)
                 t = time.perf_counter()
-                _lib.extend(self.code, G, done, stop)
+                _lib.extend(self.code, G, done, stop, method, threads)
                 dt = time.perf_counter() - t
                 done = stop
                 # adapt chunk size: cost per value grows linearly with n
@@ -477,7 +505,8 @@ def compute(code: str, n: int, **kw) -> NimSequence:
     n
         Number of heap sizes.
     **kw
-        Passed to :meth:`NimSequence.extend` (``progress``, ``chunk_seconds``).
+        Passed to :class:`NimSequence` (``progress``, ``chunk_seconds``, ``method``,
+        ``threads``).
 
     Returns
     -------

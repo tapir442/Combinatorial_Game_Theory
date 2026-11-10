@@ -1,0 +1,60 @@
+// GPU block scan for octal_extend_gpu() (Vulkan compute, GLSL 4.50).
+//
+// Same job as block_scan() in octal.c: for every heap n = n0 + h of a block
+// and every pair a + b = n - k with a < b < n0 (both values already known),
+// mark G[a] ^ G[b] in a bitset of reachable values.  One workgroup per heap;
+// its 256 invocations stride over a and OR into a bitset in shared memory,
+// which is then written to marks[h * nwords ...].
+//
+// Compiled to SPIR-V and embedded as a C array (octal_gpu_spv.h) by
+//     glslangValidator -V --vn octal_gpu_spv -o octal_gpu_spv.h octal_gpu.comp
+// (`make spv`).  The generated header is committed, so building the library
+// does not need glslang.
+#version 450
+
+layout(local_size_x = 256) in;
+
+// nim-values, two uint16 per uint32 (little-endian: G[2i] in the low half)
+layout(std430, binding = 0) readonly buffer GBuf { uint g[]; };
+// output: nwords uint32 per heap of the block, bit x set if value x is reachable
+layout(std430, binding = 1) writeonly buffer MBuf { uint marks[]; };
+
+layout(push_constant) uniform PC {
+    int n0;       // first heap size of the block
+    int nwords;   // bitset words per heap (vcap / 32, at least 1)
+    int t;        // index of the last code digit
+    uint km0;     // bit k of km0/km1/km2: digit d_k allows a two-heap split
+    uint km1;     //   (k = 0..31, 32..63, 64)
+    uint km2;
+} pc;
+
+shared uint bits[2048];   // up to 65536 values
+
+uint G(int i) {
+    uint w = g[i >> 1];
+    return (i & 1) != 0 ? (w >> 16) : (w & 0xffffu);
+}
+
+void main() {
+    int h = int(gl_WorkGroupID.x);
+    int lid = int(gl_LocalInvocationID.x);
+    int n = pc.n0 + h;
+    for (int i = lid; i < pc.nwords; i += 256) bits[i] = 0u;
+    barrier();
+    for (int k = 0; k <= pc.t; k++) {
+        uint km = k < 32 ? pc.km0 : (k < 64 ? pc.km1 : pc.km2);
+        if (((km >> uint(k & 31)) & 1u) == 0u) continue;
+        int m = n - k;
+        int lo = max(1, m - pc.n0 + 1);   // b = m - a < n0
+        int hi = (m - 1) / 2;             // a < b
+        for (int a = lo + lid; a <= hi; a += 256) {
+            uint x = G(a) ^ G(m - a);
+            uint bit = 1u << (x & 31u);
+            // check first: most values are already marked, and reads are much
+            // cheaper than contended atomics on the few words of the bitset
+            if ((bits[x >> 5] & bit) == 0u) atomicOr(bits[x >> 5], bit);
+        }
+    }
+    barrier();
+    for (int i = lid; i < pc.nwords; i += 256) marks[h * pc.nwords + i] = bits[i];
+}

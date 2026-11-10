@@ -58,6 +58,33 @@ for (long a = 0; a < N; a += 10000) {
 
 On −2 or −3, `G` is valid up to the heap size where the computation stopped.
 
+### `octal_extend_blocked`
+
+```c
+int octal_extend_blocked(const char *code, uint16_t *G, long from, long to, int threads);
+```
+
+Same contract and return codes as `octal_extend`, and exactly the same values, but computed with
+the blocked method on `threads` threads (≤ 0: all cores, or `OMP_NUM_THREADS`).  Much faster for
+large `n` (about 14× on 12 cores at \(n = 10^6\)); no faster for heap sizes below 4096 or for
+hexadecimal codes.  It needs a library built with `-fopenmp` (the Makefile and the Python package
+do this); otherwise it runs in one thread.  Each call starts its own thread team, so it is
+reentrant like `octal_extend`.  See [Internals](c-internals.md#the-blocked-mode).
+
+### `octal_extend_gpu`
+
+```c
+int octal_extend_gpu(const char *code, uint16_t *G, long from, long to);
+int octal_gpu_name(char *name, int len);
+```
+
+Same contract as `octal_extend`, and exactly the same values, with the parallel part of the
+blocked method on a GPU (Vulkan compute shader).  Returns −4 if there is no usable GPU, or if
+the library was built without `-DOCTAL_VULKAN -lvulkan` (the Makefile does this automatically
+when the Vulkan headers are installed).  `octal_gpu_name` writes the device name and returns 0,
+or returns −4.  The device is created on the first call and kept; concurrent calls run one after
+another.  See [Internals](c-internals.md#the-gpu-mode).
+
 ### `octal_period`
 
 ```c

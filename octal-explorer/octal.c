@@ -30,6 +30,12 @@
  * the few rare heaps, and the pair scan stops once the smallest missing value
  * is rare.  Proving that a *common* value is unreachable still needs a full
  * scan, so on .6 and .007 it is not faster.  `--check` compares both methods.
+ * `--blocked` (with `-j THREADS`) computes a block of heap sizes at once: the
+ * pairs whose heaps both lie below the block are scanned in parallel with
+ * OpenMP, only the few pairs inside the block are done sequentially (see
+ * extend_blocked()).  Same values as brute force; needs -fopenmp for threads.
+ * `--gpu` does the parallel scan of each block on a GPU with a Vulkan compute
+ * shader (octal_gpu.comp, see extend_gpu()); needs -DOCTAL_VULKAN -lvulkan.
  *
  * Caching: there is no memo/hash table of positions.  Values are computed
  * bottom-up (dynamic programming) into one array G; G(n) is read off the
@@ -58,6 +64,9 @@
 #include <time.h>
 #include <unistd.h>
 #include <zlib.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #include "octal.h"
 
@@ -93,6 +102,8 @@ typedef struct {
     unsigned mask;       /**< rare/common mask (valid if sparse) */
     long nrare;          /**< number of rare heap sizes (valid if sparse) */
     long long pairs;     /**< two-heap pairs examined (work counter) */
+    int blocked;         /**< 1: blocked method on the CPU was used, 2: on the GPU */
+    int threads;         /**< threads used by the blocked method */
 } Result;
 
 /** @brief Eventual (arithmetic) period found by find_period(). */
@@ -418,6 +429,549 @@ static unsigned choose_mask(const uint16_t *G, long n, unsigned vcap, long *rare
     return best;
 }
 
+/* ------------------------------------------------- blocked (multi-threaded) */
+
+/** Heap sizes below this use grundy_brute(); blocks of smaller heaps are too small to pay off. */
+#define BLOCK_MIN_N 4096
+/** Largest block (number of heap sizes computed together). */
+#define BLOCK_MAX 65536
+/** Memory budget for the per-block option marks (bytes). */
+#define BLOCK_MARK_BYTES (64L << 20)
+/** Tile width in a for the parallel pair scan, so G[a] and G[m-a] stay in cache. */
+#define BLOCK_TILE 4096
+
+/** Number of threads for the blocked method: @p threads, or all (OpenMP default) if <= 0. */
+static int block_threads(int threads) {
+#ifdef _OPENMP
+    return threads > 0 ? threads : omp_get_max_threads();
+#else
+    (void)threads;
+    return 1;
+#endif
+}
+
+/**
+ * @brief Parallel phase of a block: two-heap options with both heaps below @p n0.
+ *
+ * For every heap n in [n0, n0+B) and every pair a + b = n - k with
+ * a < b < n0, sets marks[(n-n0)*vcap + (G[a]^G[b])] = 1.  Those values are all
+ * known, so the heaps of the block are independent: each thread owns a range
+ * of heaps (and its rows of @p marks), and walks a in tiles of BLOCK_TILE so
+ * the G[a] and G[m-a] it reads stay in cache across its heaps.
+ *
+ * @param R         rule
+ * @param G         nim-values; only G[0..n0) is read
+ * @param n0        first heap size of the block
+ * @param B         number of heap sizes in the block
+ * @param vcap      power of two above every value in G[0..n0) (row length)
+ * @param marks     B * vcap bytes, zeroed by the caller
+ * @param nthreads  number of OpenMP threads
+ */
+static void block_scan(const Rule *R, const uint16_t *G, long n0, long B, unsigned vcap,
+                       uint8_t *marks, int nthreads) {
+    int ks[MAXDIG + 1], nk = 0;
+    for (int k = 0; k <= R->t; k++)
+        if (R->d[k] & 4) ks[nk++] = k;
+    if (!nk) return;
+    long amax = (n0 + B - 2) / 2;
+#pragma omp parallel num_threads(nthreads)
+    {
+        int tid = 0, nth = 1;
+#ifdef _OPENMP
+        tid = omp_get_thread_num();
+        nth = omp_get_num_threads();
+#endif
+        long h0 = B * tid / nth, h1 = B * (tid + 1) / nth;
+        for (long A = 1; A <= amax; A += BLOCK_TILE) {
+            long Aend = A + BLOCK_TILE - 1;
+            for (long h = h0; h < h1; h++) {
+                uint8_t *mk = marks + (size_t)h * vcap;
+                for (int i = 0; i < nk; i++) {
+                    long m = n0 + h - ks[i];
+                    long lo = m - n0 + 1, hi = (m - 1) / 2;   /* a < b < n0 */
+                    if (lo < A) lo = A;
+                    if (hi > Aend) hi = Aend;
+                    const uint16_t *Gm = G + m;
+                    for (long a = lo; a <= hi; a++) mk[G[a] ^ Gm[-a]] = 1;
+                }
+            }
+        }
+    }
+}
+
+/**
+ * @brief Record G(n) = @p g and grow the scratch when a new maximum appears.
+ * @return 0, -2 (value > 65535) or -3 (out of memory)
+ */
+static int store_value(Scratch *S, uint16_t *G, long n, unsigned g, unsigned *maxG, unsigned *vcap) {
+    if (g > 65535) return -2;
+    G[n] = (uint16_t)g;
+    if (g > *maxG) {
+        *maxG = g;
+        while (*vcap <= *maxG) *vcap *= 2;
+        if (scratch_reserve(S, 2 * (size_t)*vcap + 2)) return -3;
+    }
+    return 0;
+}
+
+/**
+ * @brief Sequential phase of a block: finish heaps n0 .. n0+B-1 in order.
+ *
+ * Adds the options block_scan() could not see, because they involve a heap
+ * of the block itself: pairs with b >= n0 (then a = m - b < B, so at most B
+ * per heap), the pair a == b, and all 0-, 1- and 3-heap options
+ * (mark_simple()).  G(n) is the mex over marks row n and the stamp table.
+ *
+ * @param marks   B rows of option marks for values < vcap0: one byte per value
+ *                (block_scan()), or with @p bitset one bit per value in
+ *                uint32 words, ceil(vcap0/32) words per row (the GPU scan)
+ * @param bitset  layout of @p marks, see above
+ * @return 0, -2 or -3 (see store_value()); G is valid up to where it stopped
+ */
+static int block_finish(Scratch *S, const Rule *R, uint16_t *G, long n0, long B, unsigned vcap0,
+                        const void *marks, int bitset, unsigned *maxG, unsigned *vcap,
+                        long long *pairs) {
+    for (long h = 0; h < B; h++) {
+        long n = n0 + h;
+        uint32_t st = (uint32_t)n;
+        mark_simple(S, R, G, n, st);
+        uint32_t *seen = S->seen;
+        for (int k = 0; k <= R->t; k++) {
+            if (!(R->d[k] & 4)) continue;
+            long m = n - k;
+            if (m < 2) continue;
+            long hi = (m - 1) / 2;
+            if (hi > m - n0) hi = m - n0;               /* b = m - a >= n0 */
+            for (long a = 1; a <= hi; a++) seen[G[a] ^ G[m - a]] = st;
+            if (!(m & 1) && pair_allowed(R, n, m / 2, m / 2)) seen[0] = st;   /* a == b */
+            *pairs += m / 2;
+        }
+        unsigned v = 0;
+        if (bitset) {
+            size_t nw = (vcap0 + 31) / 32;
+            const uint32_t *mk = (const uint32_t *)marks + (size_t)h * nw;
+            while ((v < vcap0 && (mk[v >> 5] >> (v & 31) & 1)) || seen[v] == st) v++;
+        } else {
+            const uint8_t *mk = (const uint8_t *)marks + (size_t)h * vcap0;
+            while ((v < vcap0 && mk[v]) || seen[v] == st) v++;
+        }
+        int rc = store_value(S, G, n, v, maxG, vcap);
+        if (rc) return rc;
+    }
+    return 0;
+}
+
+/**
+ * @brief Compute G[from..to) with the blocked, multi-threaded method.
+ *
+ * Heap sizes below BLOCK_MIN_N use grundy_brute().  Above, the heaps are
+ * processed in blocks [n0, n0+B), B ~ n0/32 (at most BLOCK_MAX, and B * vcap
+ * bytes of marks at most BLOCK_MARK_BYTES):
+ *
+ * 1. block_scan(): all pairs a < b < n0, in parallel (almost all the work);
+ * 2. block_finish(): the remaining O(B) options per heap, in order of n.
+ *
+ * The sequential part is about B/n0 ~ 1/32 of the pair work, so speed-up is
+ * close to the number of cores for large n.  Hexadecimal three-heap options
+ * stay sequential (in mark_simple()), so hex codes are not faster.  Gives the
+ * same values as grundy_brute() (`--blocked --check`).
+ *
+ * @param R        rule
+ * @param G        array of at least @p to entries; G[0..from) valid
+ * @param from     first heap size to compute
+ * @param to       one past the last heap size
+ * @param threads  number of threads, <= 0 for all
+ * @param pairs    incremented by the number of two-heap splits examined
+ * @return 0, -2 (value > 65535) or -3 (out of memory)
+ */
+static int extend_blocked(const Rule *R, uint16_t *G, long from, long to, int threads,
+                          long long *pairs) {
+    int nt = block_threads(threads);
+    unsigned maxG = 0, vcap = 2;
+    for (long i = 0; i < from; i++)
+        if (G[i] > maxG) maxG = G[i];
+    while (vcap <= maxG) vcap *= 2;
+    Scratch S = {0};
+    if (scratch_reserve(&S, 2 * (size_t)vcap + 2)) return -3;
+    uint8_t *marks = NULL;
+    size_t mcap = 0;
+    int rc = 0;
+    long n = from;
+    while (n < to && !rc) {
+        if (n < BLOCK_MIN_N) {
+            rc = store_value(&S, G, n, grundy_brute(&S, R, G, n, pairs), &maxG, &vcap);
+            n++;
+            continue;
+        }
+        long B = n / 32;
+        if (B > BLOCK_MAX) B = BLOCK_MAX;
+        if (B > BLOCK_MARK_BYTES / (long)vcap) B = BLOCK_MARK_BYTES / (long)vcap;
+        if (B < 1) B = 1;
+        if (B > to - n) B = to - n;
+        size_t need = (size_t)B * vcap;
+        if (need > mcap) {
+            uint8_t *p = realloc(marks, need);
+            if (!p) { rc = -3; break; }
+            marks = p;
+            mcap = need;
+        }
+        memset(marks, 0, need);
+        unsigned vcap0 = vcap;
+        block_scan(R, G, n, B, vcap0, marks, nt);
+        rc = block_finish(&S, R, G, n, B, vcap0, marks, 0, &maxG, &vcap, pairs);
+        n += B;
+    }
+    free(marks);
+    scratch_free(&S);
+    return rc;
+}
+
+/* ------------------------------------------------------------ GPU (Vulkan) */
+
+/** The GPU method computes heap sizes below this on the CPU (extend_blocked()). */
+#define GPU_MIN_N 32768
+/** GPU block size: B ~ n0 / GPU_BLOCK_DIV.  Smaller than on the CPU, because the
+ *  sequential block_finish() runs on one CPU core while the GPU waits. */
+#define GPU_BLOCK_DIV 128
+/** Largest GPU block: one workgroup per heap, one-dimensional dispatch. */
+#define GPU_BLOCK_MAX 65535
+/** Size of the buffer that receives the GPU option bitsets (bytes). */
+#define GPU_MARK_BYTES (64L << 20)
+
+#ifdef OCTAL_VULKAN
+#include <pthread.h>
+#include <vulkan/vulkan.h>
+#include "octal_gpu_spv.h"   /* SPIR-V of octal_gpu.comp: const uint32_t octal_gpu_spv[] */
+
+/**
+ * @brief The Vulkan objects shared by all GPU computations.
+ *
+ * Created once, on first use, by gpu_init() and kept until the process exits.
+ * Every use is serialised by gpu_lock: GPU computations from several threads
+ * run one after another (the GPU is one shared device anyway).
+ */
+static struct {
+    int state;                        /**< 0 not tried yet, 1 ready, -1 unavailable */
+    VkInstance inst;
+    VkPhysicalDevice phys;
+    VkDevice dev;
+    VkQueue queue;
+    VkPhysicalDeviceMemoryProperties mem;
+    VkDescriptorSetLayout dsl;
+    VkPipelineLayout layout;
+    VkPipeline pipe;
+    VkDescriptorPool dpool;
+    VkCommandPool cpool;
+    VkCommandBuffer cmd;
+    VkFence fence;
+    char name[256];                   /**< device name, e.g. "AMD Radeon ..." */
+} gpu;
+static pthread_mutex_t gpu_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/** Push constants of octal_gpu.comp (same order and types). */
+typedef struct {
+    int32_t n0, nwords, t;
+    uint32_t km[3];
+} GpuPush;
+
+/**
+ * @brief Create the Vulkan device, compute pipeline and command buffer (once).
+ *
+ * Picks the first discrete GPU, else the first integrated or virtual GPU, that
+ * has a compute queue and supports 256 invocations per workgroup.  CPU devices
+ * (llvmpipe) are skipped unless the environment variable OCTAL_GPU_ALLOW_CPU is
+ * set (useful for testing without a GPU).  Call with gpu_lock held.
+ *
+ * @return 0 if the GPU is ready, -1 if no usable device was found
+ */
+static int gpu_init(void) {
+    if (gpu.state) return gpu.state > 0 ? 0 : -1;
+    gpu.state = -1;
+    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                             .pApplicationName = "octal-explorer", .apiVersion = VK_API_VERSION_1_1};
+    VkInstanceCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app};
+    if (vkCreateInstance(&ici, NULL, &gpu.inst) != VK_SUCCESS) return -1;
+
+    uint32_t nd = 0;
+    vkEnumeratePhysicalDevices(gpu.inst, &nd, NULL);
+    VkPhysicalDevice devs[16];
+    if (nd > 16) nd = 16;
+    vkEnumeratePhysicalDevices(gpu.inst, &nd, devs);
+    int allow_cpu = getenv("OCTAL_GPU_ALLOW_CPU") != NULL;
+    int best = -1, best_score = 0;
+    uint32_t best_q = 0;
+    for (uint32_t i = 0; i < nd; i++) {
+        VkPhysicalDeviceProperties pr;
+        vkGetPhysicalDeviceProperties(devs[i], &pr);
+        int score = pr.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 4
+                  : pr.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 3
+                  : pr.deviceType == VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU ? 2
+                  : allow_cpu ? 1 : 0;
+        if (pr.limits.maxComputeWorkGroupSize[0] < 256 || pr.limits.maxComputeWorkGroupInvocations < 256 ||
+            pr.limits.maxComputeSharedMemorySize < 8192)
+            score = 0;
+        uint32_t nq = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(devs[i], &nq, NULL);
+        VkQueueFamilyProperties qp[32];
+        if (nq > 32) nq = 32;
+        vkGetPhysicalDeviceQueueFamilyProperties(devs[i], &nq, qp);
+        uint32_t q = UINT32_MAX;
+        for (uint32_t j = 0; j < nq; j++)
+            if (qp[j].queueFlags & VK_QUEUE_COMPUTE_BIT) { q = j; break; }
+        if (q == UINT32_MAX) score = 0;
+        if (score > best_score) {
+            best = (int)i;
+            best_score = score;
+            best_q = q;
+            snprintf(gpu.name, sizeof gpu.name, "%s", pr.deviceName);
+        }
+    }
+    if (best < 0) return -1;
+    gpu.phys = devs[best];
+    vkGetPhysicalDeviceMemoryProperties(gpu.phys, &gpu.mem);
+
+    float prio = 1.0f;
+    VkDeviceQueueCreateInfo qci = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                                   .queueFamilyIndex = best_q, .queueCount = 1, .pQueuePriorities = &prio};
+    VkDeviceCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                              .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci};
+    if (vkCreateDevice(gpu.phys, &dci, NULL, &gpu.dev) != VK_SUCCESS) return -1;
+    vkGetDeviceQueue(gpu.dev, best_q, 0, &gpu.queue);
+
+    VkShaderModuleCreateInfo smi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                    .codeSize = sizeof octal_gpu_spv, .pCode = octal_gpu_spv};
+    VkShaderModule sm;
+    if (vkCreateShaderModule(gpu.dev, &smi, NULL, &sm) != VK_SUCCESS) return -1;
+
+    VkDescriptorSetLayoutBinding b[2] = {
+        {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT},
+        {.binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT}};
+    VkDescriptorSetLayoutCreateInfo dli = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                           .bindingCount = 2, .pBindings = b};
+    VkPushConstantRange pcr = {.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .size = sizeof(GpuPush)};
+    if (vkCreateDescriptorSetLayout(gpu.dev, &dli, NULL, &gpu.dsl) != VK_SUCCESS) return -1;
+    VkPipelineLayoutCreateInfo pli = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                      .setLayoutCount = 1, .pSetLayouts = &gpu.dsl,
+                                      .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr};
+    if (vkCreatePipelineLayout(gpu.dev, &pli, NULL, &gpu.layout) != VK_SUCCESS) return -1;
+    VkComputePipelineCreateInfo cpi = {
+        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                  .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main"},
+        .layout = gpu.layout};
+    VkResult r = vkCreateComputePipelines(gpu.dev, VK_NULL_HANDLE, 1, &cpi, NULL, &gpu.pipe);
+    vkDestroyShaderModule(gpu.dev, sm, NULL);
+    if (r != VK_SUCCESS) return -1;
+
+    VkDescriptorPoolSize ps = {.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 2};
+    VkDescriptorPoolCreateInfo dpi = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                                      .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+                                      .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &ps};
+    if (vkCreateDescriptorPool(gpu.dev, &dpi, NULL, &gpu.dpool) != VK_SUCCESS) return -1;
+    VkCommandPoolCreateInfo cpci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                                    .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+                                    .queueFamilyIndex = best_q};
+    if (vkCreateCommandPool(gpu.dev, &cpci, NULL, &gpu.cpool) != VK_SUCCESS) return -1;
+    VkCommandBufferAllocateInfo cbi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                       .commandPool = gpu.cpool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                       .commandBufferCount = 1};
+    if (vkAllocateCommandBuffers(gpu.dev, &cbi, &gpu.cmd) != VK_SUCCESS) return -1;
+    VkFenceCreateInfo fci = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    if (vkCreateFence(gpu.dev, &fci, NULL, &gpu.fence) != VK_SUCCESS) return -1;
+    gpu.state = 1;
+    return 0;
+}
+
+/** @brief A storage buffer in host-visible memory, mapped for its whole life. */
+typedef struct {
+    VkBuffer buf;
+    VkDeviceMemory mem;
+    void *map;
+} GpuBuf;
+
+/**
+ * @brief Create a host-visible, host-coherent storage buffer of @p size bytes and map it.
+ *
+ * Prefers memory that is also device-local (all memory on integrated GPUs;
+ * resizable BAR on discrete ones), and with @p cached also host-cached, for
+ * buffers the CPU reads back.  Call with gpu_lock held.
+ *
+ * @return 0, or -1 if it cannot be allocated
+ */
+static int gpu_buf_create(GpuBuf *g, VkDeviceSize size, int cached) {
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
+                             .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                             .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+    if (vkCreateBuffer(gpu.dev, &bi, NULL, &g->buf) != VK_SUCCESS) return -1;
+    VkMemoryRequirements mr;
+    vkGetBufferMemoryRequirements(gpu.dev, g->buf, &mr);
+    const VkMemoryPropertyFlags base = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    VkMemoryPropertyFlags extra = cached ? VK_MEMORY_PROPERTY_HOST_CACHED_BIT : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    VkMemoryPropertyFlags tries[2] = {base | extra, base};
+    for (int t = 0; t < 2; t++)
+        for (uint32_t i = 0; i < gpu.mem.memoryTypeCount; i++) {
+            if (!(mr.memoryTypeBits & (1u << i))) continue;
+            if ((gpu.mem.memoryTypes[i].propertyFlags & tries[t]) != tries[t]) continue;
+            VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                       .allocationSize = mr.size, .memoryTypeIndex = i};
+            if (vkAllocateMemory(gpu.dev, &ai, NULL, &g->mem) != VK_SUCCESS) continue;
+            if (vkBindBufferMemory(gpu.dev, g->buf, g->mem, 0) == VK_SUCCESS &&
+                vkMapMemory(gpu.dev, g->mem, 0, VK_WHOLE_SIZE, 0, &g->map) == VK_SUCCESS)
+                return 0;
+            vkFreeMemory(gpu.dev, g->mem, NULL);
+            g->mem = VK_NULL_HANDLE;
+        }
+    vkDestroyBuffer(gpu.dev, g->buf, NULL);
+    g->buf = VK_NULL_HANDLE;
+    return -1;
+}
+
+/** Unmap and free @p g (no-op for a zeroed GpuBuf).  Call with gpu_lock held. */
+static void gpu_buf_free(GpuBuf *g) {
+    if (g->mem) {
+        vkUnmapMemory(gpu.dev, g->mem);
+        vkFreeMemory(gpu.dev, g->mem, NULL);
+    }
+    if (g->buf) vkDestroyBuffer(gpu.dev, g->buf, NULL);
+    memset(g, 0, sizeof *g);
+}
+
+/**
+ * @brief Run octal_gpu.comp on one block and wait for it.
+ * @return 0, or -4 on a Vulkan error
+ */
+static int gpu_scan(VkDescriptorSet ds, const GpuPush *pc, long B) {
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                   .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    if (vkResetCommandBuffer(gpu.cmd, 0) != VK_SUCCESS || vkBeginCommandBuffer(gpu.cmd, &bi) != VK_SUCCESS)
+        return -4;
+    vkCmdBindPipeline(gpu.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gpu.pipe);
+    vkCmdBindDescriptorSets(gpu.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gpu.layout, 0, 1, &ds, 0, NULL);
+    vkCmdPushConstants(gpu.cmd, gpu.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof *pc, pc);
+    vkCmdDispatch(gpu.cmd, (uint32_t)B, 1, 1);
+    /* make the shader's writes visible to the host after the fence */
+    VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                          .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
+    vkCmdPipelineBarrier(gpu.cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb,
+                         0, NULL, 0, NULL);
+    if (vkEndCommandBuffer(gpu.cmd) != VK_SUCCESS) return -4;
+    VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1,
+                       .pCommandBuffers = &gpu.cmd};
+    if (vkQueueSubmit(gpu.queue, 1, &si, gpu.fence) != VK_SUCCESS) return -4;
+    VkResult r = vkWaitForFences(gpu.dev, 1, &gpu.fence, VK_TRUE, UINT64_MAX);
+    vkResetFences(gpu.dev, 1, &gpu.fence);
+    return r == VK_SUCCESS ? 0 : -4;
+}
+
+/** Name of the GPU into @p name (0), or -4 if none is usable. */
+static int gpu_name(char *name, int len) {
+    pthread_mutex_lock(&gpu_lock);
+    int rc = gpu_init() ? -4 : 0;
+    if (!rc) snprintf(name, (size_t)len, "%s", gpu.name);
+    pthread_mutex_unlock(&gpu_lock);
+    return rc;
+}
+
+/**
+ * @brief Compute G[from..to) with the blocked method, scanning blocks on the GPU.
+ *
+ * Like extend_blocked(), but block_scan() runs as the compute shader
+ * octal_gpu.comp: one workgroup per heap of the block, option bitsets in
+ * shared memory.  block_finish() stays on one CPU core; the blocks are smaller
+ * (B ~ n0/128) to keep that sequential part small.  Heap sizes below GPU_MIN_N
+ * are computed with extend_blocked() on all CPU cores.
+ *
+ * The nim-values live in a host-visible buffer that the CPU appends each
+ * finished block to; this is fast on integrated GPUs (shared memory) and on
+ * discrete GPUs with resizable BAR, slower otherwise.  Assumes a
+ * little-endian host (the shader reads two uint16 per uint32).
+ *
+ * @return 0, -2 (value > 65535), -3 (out of memory) or -4 (no usable GPU, or
+ *         a Vulkan error); G is valid up to where it stopped
+ */
+static int extend_gpu(const Rule *R, uint16_t *G, long from, long to, long long *pairs) {
+    pthread_mutex_lock(&gpu_lock);
+    int ok = gpu_init() == 0;
+    pthread_mutex_unlock(&gpu_lock);
+    if (!ok) return -4;
+    if (from < GPU_MIN_N) {
+        long e = to < GPU_MIN_N ? to : GPU_MIN_N;
+        int rc = extend_blocked(R, G, from, e, 0, pairs);
+        if (rc || e == to) return rc;
+        from = e;
+    }
+
+    pthread_mutex_lock(&gpu_lock);
+    int rc = 0;
+    GpuBuf gb = {0}, mb = {0};
+    VkDescriptorSet ds = VK_NULL_HANDLE;
+    Scratch S = {0};
+    if (gpu_buf_create(&gb, (VkDeviceSize)((to + 1) / 2) * 4, 0) || gpu_buf_create(&mb, GPU_MARK_BYTES, 1)) {
+        rc = -3;
+        goto done;
+    }
+    VkDescriptorSetAllocateInfo dai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                       .descriptorPool = gpu.dpool, .descriptorSetCount = 1,
+                                       .pSetLayouts = &gpu.dsl};
+    if (vkAllocateDescriptorSets(gpu.dev, &dai, &ds) != VK_SUCCESS) { rc = -4; goto done; }
+    VkDescriptorBufferInfo dbi[2] = {{gb.buf, 0, VK_WHOLE_SIZE}, {mb.buf, 0, VK_WHOLE_SIZE}};
+    VkWriteDescriptorSet w[2];
+    for (int i = 0; i < 2; i++)
+        w[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds,
+                                      .dstBinding = (uint32_t)i, .descriptorCount = 1,
+                                      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                      .pBufferInfo = &dbi[i]};
+    vkUpdateDescriptorSets(gpu.dev, 2, w, 0, NULL);
+
+    uint16_t *dG = gb.map;
+    memcpy(dG, G, (size_t)from * sizeof *G);
+    unsigned maxG = 0, vcap = 2;
+    for (long i = 0; i < from; i++)
+        if (G[i] > maxG) maxG = G[i];
+    while (vcap <= maxG) vcap *= 2;
+    if (scratch_reserve(&S, 2 * (size_t)vcap + 2)) { rc = -3; goto done; }
+    GpuPush pc = {.t = R->t};
+    for (int k = 0; k <= R->t; k++)
+        if (R->d[k] & 4) pc.km[k / 32] |= 1u << (k % 32);
+
+    for (long n = from; n < to && !rc;) {
+        int nwords = (int)((vcap + 31) / 32);
+        long B = n / GPU_BLOCK_DIV;
+        if (B > GPU_BLOCK_MAX) B = GPU_BLOCK_MAX;
+        if (B > GPU_MARK_BYTES / (4L * nwords)) B = GPU_MARK_BYTES / (4L * nwords);
+        if (B > to - n) B = to - n;
+        if (B < 1) B = 1;
+        pc.n0 = (int32_t)n;
+        pc.nwords = nwords;
+        unsigned vcap0 = vcap;
+        rc = gpu_scan(ds, &pc, B);
+        if (rc) break;
+        rc = block_finish(&S, R, G, n, B, vcap0, mb.map, 1, &maxG, &vcap, pairs);
+        if (rc) break;
+        memcpy(dG + n, G + n, (size_t)B * sizeof *G);   /* the next blocks read them */
+        n += B;
+    }
+done:
+    if (ds) vkFreeDescriptorSets(gpu.dev, gpu.dpool, 1, &ds);
+    gpu_buf_free(&gb);
+    gpu_buf_free(&mb);
+    scratch_free(&S);
+    pthread_mutex_unlock(&gpu_lock);
+    return rc;
+}
+#else  /* !OCTAL_VULKAN */
+static int gpu_name(char *name, int len) {
+    (void)name; (void)len;
+    return -4;
+}
+static int extend_gpu(const Rule *R, uint16_t *G, long from, long to, long long *pairs) {
+    (void)R; (void)G; (void)from; (void)to; (void)pairs;
+    return -4;
+}
+#endif /* OCTAL_VULKAN */
+
 /**
  * @brief Compute G(0) .. G(N-1) (command-line program).
  *
@@ -430,13 +984,37 @@ static unsigned choose_mask(const uint16_t *G, long n, unsigned vcap, long *rare
  * @param R             rule
  * @param N             number of heap sizes
  * @param allow_sparse  enable the experimental sparse method
+ * @param blocked       1: use extend_blocked(), 2: extend_gpu() (ignores @p allow_sparse)
+ * @param threads       threads for the blocked method, <= 0 for all
  * @return the sequence and statistics; the caller frees Result.G
  */
-static Result compute(const Rule *R, long N, int allow_sparse) {
+static Result compute(const Rule *R, long N, int allow_sparse, int blocked, int threads) {
     Result res = {0};
     res.N = N;
     res.G = xcalloc((size_t)N, sizeof *res.G);
     uint16_t *G = res.G;
+    if (blocked) {
+        double t0 = now();
+        int show = !quiet && isatty(2);
+        res.blocked = blocked;
+        res.threads = block_threads(threads);
+        for (long n = 0; n < N;) {
+            long e = n + (n < 65536 ? 65536 : n / 8);
+            if (e > N) e = N;
+            int rc = blocked == 2 ? extend_gpu(R, G, n, e, &res.pairs)
+                                  : extend_blocked(R, G, n, e, threads, &res.pairs);
+            if (rc == -2) die("nim-value exceeds 65535; not supported");
+            if (rc == -4) die("no usable GPU (Vulkan), or not built with -DOCTAL_VULKAN");
+            if (rc) die("out of memory");
+            n = e;
+            if (show)
+                fprintf(stderr, "\r  n = %ld / %ld  (%.0f%%, %s, %.0f s)   ", n, N, 100.0 * n / N,
+                        blocked == 2 ? "gpu" : "blocked", now() - t0);
+        }
+        if (show) fprintf(stderr, "\r%78s\r", "");
+        res.secs = now() - t0;
+        return res;
+    }
     unsigned maxG = 0, vcap = 2;
     Scratch S = {0};
     if (scratch_reserve(&S, 2 * vcap + 2)) die("out of memory");
@@ -1146,6 +1724,29 @@ int octal_extend(const char *code, uint16_t *G, long from, long to) {
     return rc;
 }
 
+/** See octal.h.  Fill G[from..to) with extend_blocked() using @p threads
+ *  threads (<= 0: all).  Returns 0, -1, -2 or -3 like octal_extend(). */
+int octal_extend_blocked(const char *code, uint16_t *G, long from, long to, int threads) {
+    Rule R;
+    if (parse_rule(code, &R)) return -1;
+    long long pairs = 0;
+    return extend_blocked(&R, G, from, to, threads, &pairs);
+}
+
+/** See octal.h.  Fill G[from..to) with extend_gpu().  Returns 0, -1, -2, -3
+ *  like octal_extend(), or -4 if no GPU is usable. */
+int octal_extend_gpu(const char *code, uint16_t *G, long from, long to) {
+    Rule R;
+    if (parse_rule(code, &R)) return -1;
+    long long pairs = 0;
+    return extend_gpu(&R, G, from, to, &pairs);
+}
+
+/** See octal.h.  Name of the GPU used by octal_extend_gpu(); 0, or -4 if none. */
+int octal_gpu_name(char *name, int len) {
+    return gpu_name(name, len);
+}
+
 /** See octal.h.  Wraps find_period() without saltus: returns 0 none,
  *  1 apparent, 2 proved (-1 bad code); out[0] = preperiod, out[1] = period. */
 int octal_period(const char *code, const uint16_t *G, long N, long *out) {
@@ -1187,7 +1788,10 @@ static void usage(void) {
 "  -e M        values embedded in index.html (default 200000)\n"
 "  --sparse    use the sparse-space method (experimental; brute force is the default\n"
 "              and is usually as fast or faster)\n"
-"  --check     compute with both methods and compare (for testing)\n"
+"  --blocked   blocked multi-threaded method (same values as brute force)\n"
+"  -j THREADS  threads for --blocked (default: all cores)\n"
+"  --gpu       blocked method with the parallel part on the GPU (Vulkan)\n"
+"  --check     compare --sparse (default), --blocked or --gpu with brute force\n"
 "  -p          print the sequence to stdout and skip output files\n"
 "  -q          quiet\n");
     exit(2);
@@ -1203,13 +1807,14 @@ static void usage(void) {
  */
 int main(int argc, char **argv) {
     long N = 10000, embed = 200000;
-    int W = 0, L = 1000, sparse = 0, check = 0, print = 0;
+    int W = 0, L = 1000, sparse = 0, check = 0, print = 0, blocked = 0, threads = 0;
     const char *dir = NULL;
     static struct option lo[] = {{"brute", no_argument, 0, 'b'}, {"sparse", no_argument, 0, 's'},
-                                 {"check", no_argument, 0, 'c'},
+                                 {"check", no_argument, 0, 'c'}, {"blocked", no_argument, 0, 'B'},
+                                 {"gpu", no_argument, 0, 'G'},
                                  {"help", no_argument, 0, 'h'}, {0, 0, 0, 0}};
     int c;
-    while ((c = getopt_long(argc, argv, "n:o:w:L:e:pqh", lo, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "n:o:w:L:e:j:pqh", lo, NULL)) != -1) {
         switch (c) {
         case 'n': N = atol(optarg); break;
         case 'o': dir = optarg; break;
@@ -1219,6 +1824,9 @@ int main(int argc, char **argv) {
         case 'b': sparse = 0; break;
         case 's': sparse = 1; break;
         case 'c': check = 1; break;
+        case 'B': blocked = 1; break;
+        case 'G': blocked = 2; break;
+        case 'j': threads = atoi(optarg); break;
         case 'p': print = 1; break;
         case 'q': quiet = 1; break;
         default: usage();
@@ -1229,17 +1837,24 @@ int main(int argc, char **argv) {
     Rule R;
     if (parse_rule(argv[optind], &R)) die("cannot parse code (examples: .007  0.6  .137  4.  grundy)");
 
-    Result res = compute(&R, N, sparse || check);
+    Result res = compute(&R, N, !blocked && (sparse || check), blocked, threads);
 
     if (check) {
-        Result b = compute(&R, N, 0);
+        Result b = compute(&R, N, 0, 0, 0);
+        const char *m = blocked == 2 ? "gpu" : blocked ? "blocked" : "sparse";
         for (long n = 0; n < N; n++)
             if (b.G[n] != res.G[n]) {
-                printf("MISMATCH at n = %ld: sparse %u, brute %u\n", n, res.G[n], b.G[n]);
+                printf("MISMATCH at n = %ld: %s %u, brute %u\n", n, m, res.G[n], b.G[n]);
                 return 1;
             }
-        printf("check OK: %s, n < %ld, sparse %.2f s (%s), brute %.2f s\n", R.code, N, res.secs,
-               res.sparse ? "active" : "inactive", b.secs);
+        if (blocked == 2)
+            printf("check OK: %s, n < %ld, gpu %.2f s, brute %.2f s\n", R.code, N, res.secs, b.secs);
+        else if (blocked)
+            printf("check OK: %s, n < %ld, blocked %.2f s (%d threads), brute %.2f s\n", R.code, N,
+                   res.secs, res.threads, b.secs);
+        else
+            printf("check OK: %s, n < %ld, sparse %.2f s (%s), brute %.2f s\n", R.code, N, res.secs,
+                   res.sparse ? "active" : "inactive", b.secs);
         return 0;
     }
 
@@ -1305,7 +1920,12 @@ int main(int argc, char **argv) {
         if (!g) continue;
         fprintf(g, "%s\n", R.name);
         fprintf(g, "heap sizes      0 .. %ld\n", N - 1);
-        fprintf(g, "time            %.2f s (%s)\n", res.secs, res.sparse ? "sparse-space" : "brute force");
+        if (res.blocked == 2)
+            fprintf(g, "time            %.2f s (gpu)\n", res.secs);
+        else if (res.blocked)
+            fprintf(g, "time            %.2f s (blocked, %d threads)\n", res.secs, res.threads);
+        else
+            fprintf(g, "time            %.2f s (%s)\n", res.secs, res.sparse ? "sparse-space" : "brute force");
         if (res.sparse)
             fprintf(g, "rare mask       0x%x, %ld rare heap sizes (%.3f%%)\n", res.mask, res.nrare,
                     100.0 * res.nrare / N);

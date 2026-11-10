@@ -27,12 +27,20 @@ class BackendError(RuntimeError):
 
 
 def _build(src: Path, out: Path) -> None:
+    """Compile with OpenMP (method="blocked") and Vulkan (method="gpu", if the generated
+    octal_gpu_spv.h exists); drop what the system does not support."""
     cc = os.environ.get("CC", "cc")
-    cmd = [cc, "-O3", "-march=native", "-std=c11", "-Wno-unused-function", "-shared", "-fPIC",
-           "-DOCTAL_NO_MAIN", "-o", str(out), str(src), "-lz", "-lm"]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise BackendError(f"building {out.name} failed:\n{' '.join(cmd)}\n{r.stderr}")
+    base = [cc, "-O3", "-march=native", "-std=c11", "-Wno-unused-function", "-shared", "-fPIC",
+            "-DOCTAL_NO_MAIN", "-o", str(out), str(src), "-lz", "-lm"]
+    omp, vk = ["-fopenmp"], ["-DOCTAL_VULKAN", "-lvulkan"]
+    variants = [base[:1] + omp + base[1:], base]
+    if src.with_name("octal_gpu_spv.h").exists():
+        variants = [v + vk for v in variants] + variants
+    for cmd in variants:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0:
+            return
+    raise BackendError(f"building {out.name} failed:\n{' '.join(cmd)}\n{r.stderr}")
 
 
 def load():
@@ -49,8 +57,8 @@ def _load():
     path = Path(os.environ.get("OCTALGAMES_LIB", _HERE / "liboctal.so"))
     src = next((s for s in _SOURCES if s.exists()), None)
     if "OCTALGAMES_LIB" not in os.environ and src is not None:
-        hdr = src.with_name("octal.h")
-        newest = max(src.stat().st_mtime, hdr.stat().st_mtime if hdr.exists() else 0)
+        deps = [src.with_name("octal.h"), src.with_name("octal_gpu_spv.h")]
+        newest = max([src.stat().st_mtime] + [d.stat().st_mtime for d in deps if d.exists()])
         if not path.exists() or newest > path.stat().st_mtime:
             _build(src, path)
     if not path.exists():
@@ -61,6 +69,12 @@ def _load():
     lib.octal_rule_name.restype = ctypes.c_int
     lib.octal_extend.argtypes = [ctypes.c_char_p, u16, ctypes.c_long, ctypes.c_long]
     lib.octal_extend.restype = ctypes.c_int
+    lib.octal_extend_blocked.argtypes = [ctypes.c_char_p, u16, ctypes.c_long, ctypes.c_long, ctypes.c_int]
+    lib.octal_extend_blocked.restype = ctypes.c_int
+    lib.octal_extend_gpu.argtypes = [ctypes.c_char_p, u16, ctypes.c_long, ctypes.c_long]
+    lib.octal_extend_gpu.restype = ctypes.c_int
+    lib.octal_gpu_name.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    lib.octal_gpu_name.restype = ctypes.c_int
     lib.octal_period.argtypes = [ctypes.c_char_p, u16, ctypes.c_long, ctypes.POINTER(ctypes.c_long)]
     lib.octal_period.restype = ctypes.c_int
     lib.octal_period_ex.argtypes = [ctypes.c_char_p, u16, ctypes.c_long, ctypes.POINTER(ctypes.c_long)]
@@ -75,18 +89,43 @@ def rule_name(code: str) -> str:
     return buf.value.decode()
 
 
-def extend(code: str, values: np.ndarray, start: int, stop: int) -> None:
+METHODS = ("brute", "blocked", "gpu")
+
+
+def gpu_name():
+    """Name of the GPU used by method="gpu", or None if there is none (or no Vulkan support)."""
+    buf = ctypes.create_string_buffer(256)
+    if load().octal_gpu_name(buf, 256) != 0:
+        return None
+    return buf.value.decode()
+
+
+def extend(code: str, values: np.ndarray, start: int, stop: int, method: str = "brute",
+           threads: int = 0) -> None:
     """Fill values[start:stop] in place (values[:start] must be valid).
 
-    Thread-safe; releases the GIL while the C code runs.
+    method="brute" uses octal_extend() (one core); method="blocked" uses
+    octal_extend_blocked() with `threads` threads (0 = all cores); method="gpu"
+    uses octal_extend_gpu() (Vulkan).  All give the same values.  Thread-safe;
+    releases the GIL while the C code runs.
     """
-    rc = load().octal_extend(code.encode(), values, start, stop)
+    if method == "brute":
+        rc = load().octal_extend(code.encode(), values, start, stop)
+    elif method == "blocked":
+        rc = load().octal_extend_blocked(code.encode(), values, start, stop, int(threads))
+    elif method == "gpu":
+        rc = load().octal_extend_gpu(code.encode(), values, start, stop)
+    else:
+        raise ValueError(f"method must be one of {METHODS}, not {method!r}")
     if rc == -1:
         raise ValueError(f"cannot parse game code {code!r}")
     if rc == -2:
         raise OverflowError("nim-value exceeds 65535")
     if rc == -3:
         raise MemoryError("octal backend: out of memory")
+    if rc == -4:
+        raise RuntimeError("method='gpu': no usable Vulkan GPU, or the library was built without "
+                           "Vulkan (needs octal_gpu_spv.h and libvulkan)")
 
 
 def period(code: str, values: np.ndarray, n: int):

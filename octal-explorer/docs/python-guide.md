@@ -115,6 +115,29 @@ with ThreadPoolExecutor(8) as ex:
 ```
 
 On a 12-core machine this is about 4× faster than computing them one after another.
-The slowest game (Kayles) limits it.  A single sequence is still computed by one core,
-because each value depends on all earlier values.  Don't call `extend` on the *same*
-`NimSequence` from two threads at once.
+The slowest game (Kayles) limits it.  By default a single sequence is computed by one
+core.  Don't call `extend` on the *same* `NimSequence` from two threads at once.
+
+## Using all cores for one sequence
+
+`method="blocked"` computes one sequence on several cores (it gives exactly the same values):
+
+```python
+s = og.compute(".007", 1_000_000, method="blocked")             # all cores
+s = og.compute(".007", 1_000_000, method="blocked", threads=4)  # 4 threads
+s.extend(2_000_000)                    # uses the stored method; override with method=...
+```
+
+For `.007` up to \(10^6\) this takes 10 s on 12 cores instead of 143 s.  It does not help for
+hexadecimal codes or small `n`.  Don't combine it with many games in parallel threads: each
+call already uses all cores.
+
+`method="gpu"` runs the parallel part on a Vulkan GPU instead:
+
+```python
+og.gpu_name()                          # 'AMD Radeon ...', or None without a usable GPU
+s = og.compute(".007", 1_000_000, method="gpu")
+```
+
+It raises `RuntimeError` if there is no GPU.  Whether it beats `"blocked"` depends on the GPU:
+an integrated GPU with 2 compute units is slower than 12 CPU cores (24 s vs 10 s above).

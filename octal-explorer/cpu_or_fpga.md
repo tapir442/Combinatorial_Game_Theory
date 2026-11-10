@@ -1,7 +1,12 @@
 # Idea: computing octal nim-sequences on multi-core CPU, GPU or FPGA
 
-Status: idea, not implemented. All speed figures are back-of-envelope estimates,
-not measurements.
+Status:
+- **Multi-core CPU (section 1): implemented.** `octal --blocked -j N`, `octal_extend_blocked()`,
+  Python `method="blocked"`.  Measured on .007, N = 10⁶, 12 cores: 143 s brute force → 9.5 s (15×).
+- **GPU (section 2): implemented with Vulkan, not CUDA.** `octal --gpu`, `octal_extend_gpu()`,
+  Python `method="gpu"`.  The only GPU available was the Ryzen 9 7900X iGPU (2 CUs): 23.6 s for the
+  same run, 3.3× one core but slower than 24 CPU threads.  Not yet measured on a discrete GPU.
+- **FPGA (section 3): idea only.**  Its figures are back-of-envelope estimates, not measurements.
 
 ## Why it does not parallelise naively
 

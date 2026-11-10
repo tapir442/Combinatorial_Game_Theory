@@ -15,14 +15,14 @@ from .core import NimSequence, Period, colormap, compute, octal_codes, palette, 
 from . import plot as _plot  # noqa: F401  (attaches plot methods)
 from .plot import (dashboard, plot_autocorr, plot_first_occurrence, plot_folded, plot_histogram,
                    plot_values, plot_wrap)
-from ._lib import rule_name
+from ._lib import gpu_name, rule_name
 
 try:  # widgets are optional
     from .widgets import explore
 except Exception:  # pragma: no cover
     explore = None
 
-__all__ = ["NimSequence", "Period", "compute", "survey", "octal_codes", "rule_name", "palette",
+__all__ = ["NimSequence", "Period", "compute", "survey", "octal_codes", "rule_name", "gpu_name", "palette",
            "colormap", "plot_values", "plot_wrap", "plot_autocorr", "plot_histogram",
            "plot_first_occurrence", "plot_folded", "dashboard", "explore"]
 __version__ = "0.1.0"
