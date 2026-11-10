@@ -96,6 +96,16 @@ The same with a HIP kernel on an AMD GPU (ROCm) instead of Vulkan.  Needs a libr
 `-DOCTAL_ROCM` and linked with `octal_rocm.o` (from `hipcc`) and `-lamdhip64`; the Makefile and
 the Python package do this when `hipcc` is installed.  Returns −4 otherwise.
 
+### `octal_extend_rare`
+
+```c
+int octal_extend_rare(const char *code, uint16_t *G, long from, long to);
+```
+
+Same contract and values as `octal_extend`, with the rare-value algorithm (Grossman 2017) on
+one core.  Fast for games with few rare values; for other games it falls back to brute force.
+See [Rare-value algorithm](rare-values.md).
+
 ### `octal_period`
 
 ```c

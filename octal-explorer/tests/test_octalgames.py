@@ -217,8 +217,18 @@ def test_rocm_unavailable_raises():
             og.compute(".007", 40000, progress=False, method="rocm")
 
 
+def test_method_enum_accepts_strings():
+    assert og.Method.parse("gpu") is og.Method.GPU
+    assert og.Method.parse(og.Method.ROCM) is og.Method.ROCM
+    assert og.Method.BLOCKED == "blocked" and str(og.Method.BLOCKED) == "blocked"
+    s = og.compute(".007", 100, progress=False, method="brute")
+    assert s.method is og.Method.BRUTE
+    with pytest.raises(ValueError):
+        og.Method.parse("cuda")
+
+
 def test_default_method():
-    assert og.get_default_method() == "blocked"
+    assert og.get_default_method() is og.Method.BLOCKED
     assert og.compute(".007", 100, progress=False).method == "blocked"
     try:
         og.set_default_method("brute")
@@ -237,3 +247,15 @@ def test_default_method_from_environment():
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                        env={**__import__("os").environ, "OCTALGAMES_METHOD": "brute"})
     assert r.stdout.split() == ["brute", "brute"], r.stderr
+
+
+@pytest.mark.parametrize("code", [".6", "grundy", "couples", ".007", ".77", "4.07"])
+def test_rare_equals_brute(code):
+    """The rare-value algorithm is exact, whether it becomes active (.6, grundy, couples)
+    or falls back to brute force (.007), also when computed in small chunks."""
+    n = 40000
+    a = og.compute(code, n, progress=False, method="brute")
+    b = og.compute(code, n, progress=False, method="rare")
+    c = og.compute(code, n, progress=False, method=og.Method.RARE, chunk_seconds=0.001)
+    assert np.array_equal(a.values, b.values)
+    assert np.array_equal(a.values, c.values)

@@ -82,6 +82,10 @@ test: octal test-threads
 	./octal couples -n 50000 --blocked --check
 	./octal 4.07 -n 50000 --blocked --check
 	./octal .f6 -n 5000 --blocked --check
+	./octal .6 -n 60000 --rare --check
+	./octal grundy -n 60000 --rare --check
+	./octal couples -n 60000 --rare --check
+	./octal .007 -n 20000 --rare --check
 	./octal .77 -n 500 -q -o /tmp/octal-test-kayles && grep -q "period          12, preperiod 71 (PROVED" /tmp/octal-test-kayles/summary.txt && echo "Kayles period 12 OK"
 	./octal .07 -n 500 -q -o /tmp/octal-test-dawson && grep -q "period          34, preperiod 53 (PROVED" /tmp/octal-test-dawson/summary.txt && echo "Dawson's Kayles period 34 OK"
 
@@ -112,6 +116,10 @@ CGSUITE ?= $(HOME)/CGSuite
 bench: lib
 	uv run python benchmarks/bench_cgsuite.py --cgsuite $(CGSUITE)
 
+# brute / blocked / rare (and --gpu / --rocm with BENCH_GPU=--gpu) on .6, grundy, couples, .007
+bench-methods: octal
+	uv run python benchmarks/bench_methods.py $(BENCH_GPU)
+
 bench-quick: lib
 	uv run python benchmarks/bench_cgsuite.py --cgsuite $(CGSUITE) --quick --out /tmp/octal-bench-quick
 
@@ -122,4 +130,4 @@ doxygen:
 	doxygen Doxyfile
 	@test -s doxygen/warnings.log && cat doxygen/warnings.log || echo "doxygen: no warnings"
 
-.PHONY: all lib spv test test-gpu test-rocm test-threads clean venv pytest lab docs docs-build bench bench-quick doxygen
+.PHONY: all lib spv test test-gpu test-rocm test-threads bench-methods clean venv pytest lab docs docs-build bench bench-quick doxygen

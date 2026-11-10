@@ -146,10 +146,16 @@ s = og.compute(".007", 1_000_000, method="gpu")
 
 ## Changing the default method
 
+The methods are the members of `og.Method`: `BRUTE`, `BLOCKED` (the default), `GPU`, `ROCM` and
+`RARE`.  Their string values (`"brute"`, `"blocked"`, `"gpu"`, `"rocm"`, `"rare"`) are accepted
+everywhere too.  `RARE` is the [rare-value algorithm](rare-values.md): one core, but much faster
+than the others for games with few rare values, such as `.6`, `grundy` and `couples`.
+
 ```python
-og.set_default_method("gpu")              # all later compute() / NimSequence() / survey() calls
+og.set_default_method(og.Method.GPU)      # all later compute() / NimSequence() / survey() calls
 og.set_default_method("blocked", threads=4)
-og.get_default_method()                   # 'blocked'
+og.get_default_method()                   # <Method.BLOCKED: 'blocked'>
+s.method                                  # the method a sequence uses for extend()
 ```
 
 Or set it before Python starts, for example for a whole JupyterLab session:

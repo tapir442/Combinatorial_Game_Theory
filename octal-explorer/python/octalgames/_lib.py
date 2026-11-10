@@ -7,6 +7,7 @@ Set OCTALGAMES_LIB to use a library somewhere else.
 from __future__ import annotations
 
 import ctypes
+import enum
 import itertools
 import os
 import shutil
@@ -29,7 +30,7 @@ class BackendError(RuntimeError):
 
 
 def _build_rocm(src: Path, out: Path):
-    """Compile octal_rocm.hip with hipcc (for method="rocm"); return the link flags, or []."""
+    """Compile octal_rocm.hip with hipcc (for Method.ROCM); return the link flags, or []."""
     hip = src.with_name("octal_rocm.hip")
     hipcc = os.environ.get("HIPCC", "hipcc")
     if not hip.exists() or not shutil.which(hipcc):
@@ -44,8 +45,8 @@ def _build_rocm(src: Path, out: Path):
 
 
 def _build(src: Path, out: Path) -> None:
-    """Compile with OpenMP (method="blocked"), Vulkan (method="gpu", if the generated
-    octal_gpu_spv.h exists) and ROCm (method="rocm", if hipcc works); drop what the
+    """Compile with OpenMP (Method.BLOCKED), Vulkan (Method.GPU, if the generated
+    octal_gpu_spv.h exists) and ROCm (Method.ROCM, if hipcc works); drop what the
     system does not support."""
     cc = os.environ.get("CC", "cc")
     base = [cc, "-O3", "-march=native", "-std=c11", "-Wno-unused-function", "-shared", "-fPIC",
@@ -100,6 +101,8 @@ def _load():
     lib.octal_gpu_name.restype = ctypes.c_int
     lib.octal_extend_rocm.argtypes = [ctypes.c_char_p, u16, ctypes.c_long, ctypes.c_long]
     lib.octal_extend_rocm.restype = ctypes.c_int
+    lib.octal_extend_rare.argtypes = [ctypes.c_char_p, u16, ctypes.c_long, ctypes.c_long]
+    lib.octal_extend_rare.restype = ctypes.c_int
     lib.octal_rocm_name.argtypes = [ctypes.c_char_p, ctypes.c_int]
     lib.octal_rocm_name.restype = ctypes.c_int
     lib.octal_period.argtypes = [ctypes.c_char_p, u16, ctypes.c_long, ctypes.POINTER(ctypes.c_long)]
@@ -116,11 +119,40 @@ def rule_name(code: str) -> str:
     return buf.value.decode()
 
 
-METHODS = ("brute", "blocked", "gpu", "rocm")
+class Method(str, enum.Enum):
+    """How nim-values are computed.  All methods give exactly the same values.
+
+    Wherever a Method is expected, its string value (``"blocked"`` ...) works too.
+    """
+    BRUTE = "brute"      #: octal_extend(): brute force, one core
+    BLOCKED = "blocked"  #: octal_extend_blocked(): blocked method, all cores (the default)
+    GPU = "gpu"          #: octal_extend_gpu(): blocked method on a Vulkan GPU
+    ROCM = "rocm"        #: octal_extend_rocm(): blocked method on an AMD GPU with ROCm (HIP)
+    RARE = "rare"        #: octal_extend_rare(): rare-value algorithm (Grossman 2017), one core
+
+    def __str__(self) -> str:
+        return self.value
+
+    @classmethod
+    def parse(cls, method) -> "Method":
+        """``method`` as a Method; ValueError if it is not one (or the value of one)."""
+        try:
+            return cls(method)
+        except ValueError:
+            raise ValueError(f"method must be one of {[m.value for m in cls]}, not {method!r}") from None
+
+
+#: what -4 (no usable GPU) means for each GPU method
+_NO_DEVICE = {
+    Method.GPU: "method='gpu': no usable Vulkan GPU, or the library was built without Vulkan "
+                "(needs octal_gpu_spv.h and libvulkan)",
+    Method.ROCM: "method='rocm': no usable ROCm GPU, or the library was built without ROCm "
+                 "(needs hipcc and libamdhip64)",
+}
 
 
 def gpu_name():
-    """Name of the GPU used by method="gpu", or None if there is none (or no Vulkan support)."""
+    """Name of the GPU used by Method.GPU, or None if there is none (or no Vulkan support)."""
     buf = ctypes.create_string_buffer(256)
     if load().octal_gpu_name(buf, 256) != 0:
         return None
@@ -128,45 +160,37 @@ def gpu_name():
 
 
 def rocm_name():
-    """Name of the GPU used by method="rocm", or None if there is none (or no ROCm support)."""
+    """Name of the GPU used by Method.ROCM, or None if there is none (or no ROCm support)."""
     buf = ctypes.create_string_buffer(256)
     if load().octal_rocm_name(buf, 256) != 0:
         return None
     return buf.value.decode()
 
 
-def extend(code: str, values: np.ndarray, start: int, stop: int, method: str = "brute",
+def extend(code: str, values: np.ndarray, start: int, stop: int, method: Method | str = Method.BRUTE,
            threads: int = 0) -> None:
     """Fill values[start:stop] in place (values[:start] must be valid).
 
-    method="brute" uses octal_extend() (one core); method="blocked" uses
-    octal_extend_blocked() with `threads` threads (0 = all cores); method="gpu"
-    uses octal_extend_gpu() (Vulkan), method="rocm" octal_extend_rocm() (HIP).
-    All give the same values.  Thread-safe;
-    releases the GIL while the C code runs.
+    Uses the C function of `method` (see Method); `threads` is the thread count
+    for Method.BLOCKED (0 = all cores).  Thread-safe; releases the GIL while the
+    C code runs.
     """
-    if method == "brute":
-        rc = load().octal_extend(code.encode(), values, start, stop)
-    elif method == "blocked":
-        rc = load().octal_extend_blocked(code.encode(), values, start, stop, int(threads))
-    elif method == "gpu":
-        rc = load().octal_extend_gpu(code.encode(), values, start, stop)
-    elif method == "rocm":
-        rc = load().octal_extend_rocm(code.encode(), values, start, stop)
+    method = Method.parse(method)
+    lib, c = load(), code.encode()
+    if method is Method.BLOCKED:
+        rc = lib.octal_extend_blocked(c, values, start, stop, int(threads))
     else:
-        raise ValueError(f"method must be one of {METHODS}, not {method!r}")
+        fn = {Method.BRUTE: lib.octal_extend, Method.GPU: lib.octal_extend_gpu,
+              Method.ROCM: lib.octal_extend_rocm, Method.RARE: lib.octal_extend_rare}[method]
+        rc = fn(c, values, start, stop)
     if rc == -1:
         raise ValueError(f"cannot parse game code {code!r}")
     if rc == -2:
         raise OverflowError("nim-value exceeds 65535")
     if rc == -3:
         raise MemoryError("octal backend: out of memory")
-    if rc == -4 and method == "gpu":
-        raise RuntimeError("method='gpu': no usable Vulkan GPU, or the library was built without "
-                           "Vulkan (needs octal_gpu_spv.h and libvulkan)")
     if rc == -4:
-        raise RuntimeError("method='rocm': no usable ROCm GPU, or the library was built without "
-                           "ROCm (needs hipcc and libamdhip64)")
+        raise RuntimeError(_NO_DEVICE[method])
 
 
 def period(code: str, values: np.ndarray, n: int):

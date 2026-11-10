@@ -16,7 +16,7 @@ from .core import (NimSequence, Period, colormap, compute, get_default_method, o
 from . import plot as _plot  # noqa: F401  (attaches plot methods)
 from .plot import (dashboard, plot_autocorr, plot_first_occurrence, plot_folded, plot_histogram,
                    plot_values, plot_wrap)
-from ._lib import gpu_name, rocm_name, rule_name
+from ._lib import Method, gpu_name, rocm_name, rule_name
 
 try:  # widgets are optional
     from .widgets import explore
@@ -26,5 +26,5 @@ except Exception:  # pragma: no cover
 __all__ = ["NimSequence", "Period", "compute", "survey", "octal_codes", "rule_name", "gpu_name", "rocm_name", "palette",
            "colormap", "plot_values", "plot_wrap", "plot_autocorr", "plot_histogram",
            "plot_first_occurrence", "plot_folded", "dashboard", "explore", "set_default_method",
-           "get_default_method"]
+           "get_default_method", "Method"]
 __version__ = "0.1.0"

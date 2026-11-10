@@ -95,6 +95,24 @@ int octal_extend(const char *code, uint16_t *G, long from, long to);
 int octal_extend_blocked(const char *code, uint16_t *G, long from, long to, int threads);
 
 /**
+ * @brief Like octal_extend(), but with the rare-value algorithm (Grossman 2017).
+ *
+ * A value is rare if popcount(v & mask) is even, for a mask chosen from the
+ * data so that few heap sizes are rare.  All reachable common values come
+ * from the (few) rare heaps; the remaining rare values below the candidate
+ * usually have a witness pair among the first few thousand pairs.  So the
+ * cost per heap size is nearly constant instead of O(n) when the game has few
+ * rare values (.6, .007, ...).  Exact for every game: it falls back to brute
+ * force while no good mask exists.  One core; reentrant like octal_extend().
+ *
+ * J.P. Grossman, "Searching for periodicity in Officers", Games of No Chance 5,
+ * MSRI Publications 70 (2017), 373-385.
+ *
+ * @return 0, -1 (bad code), -2 (value > 65535) or -3 (out of memory)
+ */
+int octal_extend_rare(const char *code, uint16_t *G, long from, long to);
+
+/**
  * @brief Like octal_extend_blocked(), but with the parallel scan on the GPU.
  *
  * Each block's two-heap options below the block are scanned by a Vulkan

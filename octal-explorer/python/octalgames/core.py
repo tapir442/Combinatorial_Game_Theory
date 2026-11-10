@@ -14,6 +14,7 @@ from typing import Iterable, Optional
 import numpy as np
 
 from . import _lib
+from ._lib import Method
 
 
 @dataclass(frozen=True)
@@ -113,20 +114,14 @@ class _Progress:
 
 # --------------------------------------------------------------- default method
 
-def _check_method(method: str) -> str:
-    if method not in _lib.METHODS:
-        raise ValueError(f"method must be one of {_lib.METHODS}, not {method!r}")
-    return method
-
-
-_default = {"method": _check_method(os.environ.get("OCTALGAMES_METHOD", "blocked")),
+_default = {"method": Method.parse(os.environ.get("OCTALGAMES_METHOD", Method.BLOCKED)),
             "threads": int(os.environ.get("OCTALGAMES_THREADS", "0"))}
 
 
-def set_default_method(method: str, threads: int = 0) -> None:
+def set_default_method(method: Method | str, threads: int = 0) -> None:
     """Set the method that new sequences use when they are not given one.
 
-    The default is ``"blocked"`` (all CPU cores), or the environment variable
+    The default is :attr:`Method.BLOCKED` (all CPU cores), or the environment variable
     ``OCTALGAMES_METHOD`` (and ``OCTALGAMES_THREADS``) if set when octalgames is
     imported.  Affects :func:`compute`, :class:`NimSequence` and :func:`survey`;
     sequences created earlier keep their method.
@@ -134,18 +129,18 @@ def set_default_method(method: str, threads: int = 0) -> None:
     Parameters
     ----------
     method
-        ``"brute"``, ``"blocked"``, ``"gpu"`` or ``"rocm"``.
+        A :class:`Method`, or its value: ``"brute"``, ``"blocked"``, ``"gpu"``, ``"rocm"``.
     threads
-        Threads for ``"blocked"`` (0 = all cores).
+        Threads for :attr:`Method.BLOCKED` (0 = all cores).
 
-    >>> set_default_method("blocked"); get_default_method()
-    'blocked'
+    >>> set_default_method(Method.BLOCKED); get_default_method() is Method.BLOCKED
+    True
     """
-    _default["method"] = _check_method(method)
+    _default["method"] = Method.parse(method)
     _default["threads"] = int(threads)
 
 
-def get_default_method() -> str:
+def get_default_method() -> Method:
     """The method new sequences use when they are not given one (see :func:`set_default_method`)."""
     return _default["method"]
 
@@ -178,13 +173,13 @@ class NimSequence:
     GPU with ROCm (see :func:`octalgames.rocm_name`).  The choice is stored and
     used by later :meth:`extend` calls unless they pass their own.
 
-    >>> NimSequence(".007", 20000, method="blocked", progress=False).method
-    'blocked'
+    >>> NimSequence(".007", 20000, method=Method.BLOCKED, progress=False).method is Method.BLOCKED
+    True
     """
 
     def __init__(self, code: str, n: int = 0, *, progress: bool = True, chunk_seconds: float = 0.3,
-                 method: Optional[str] = None, threads: Optional[int] = None):
-        method = _check_method(_default["method"] if method is None else method)
+                 method: Optional[Method | str] = None, threads: Optional[int] = None):
+        method = Method.parse(_default["method"] if method is None else method)
         threads = _default["threads"] if threads is None else threads
         self.code = code
         self.name = _lib.rule_name(code)
@@ -219,7 +214,7 @@ class NimSequence:
 
     # ---- computation
     def extend(self, n: int, *, progress: bool = True, chunk_seconds: float = 0.3,
-               method: Optional[str] = None, threads: Optional[int] = None) -> "NimSequence":
+               method: Optional[Method | str] = None, threads: Optional[int] = None) -> "NimSequence":
         """Compute values up to heap size n-1 (keeps what is already there).
 
         Runs in chunks, so a Jupyter interrupt (Kernel > Interrupt) stops the
@@ -236,7 +231,7 @@ class NimSequence:
             Target duration of one C call.  Smaller values make interrupts more
             responsive.
         method
-            ``"brute"``, ``"blocked"``, ``"gpu"`` or ``"rocm"``; default: the instance's
+            A :class:`Method` or its value; default: the instance's
             :attr:`method`.
         threads
             Threads for ``"blocked"`` (0 = all cores); default: the instance's
@@ -247,9 +242,8 @@ class NimSequence:
         NimSequence
             ``self``, so calls can be chained.
         """
-        method = self.method if method is None else method
+        method = Method.parse(self.method if method is None else method)
         threads = self.threads if threads is None else threads
-        _check_method(method)
         start = len(self._G)
         if n <= start:
             return self

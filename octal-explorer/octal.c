@@ -36,6 +36,9 @@
  * extend_blocked()).  Same values as brute force; needs -fopenmp for threads.
  * `--gpu` does the parallel scan of each block on a GPU with a Vulkan compute
  * shader (octal_gpu.comp, see extend_device()); needs -DOCTAL_VULKAN -lvulkan.
+ * `--rare` is Grossman's rare-value algorithm (Games of No Chance 5, 2017; see
+ * extend_rare()): exact, one core, and nearly independent of n per value when
+ * few heap sizes have rare values.
  * `--rocm` does the same with a HIP kernel (octal_rocm.hip, compiled with
  * hipcc and linked in); needs -DOCTAL_ROCM and the object file.
  *
@@ -96,6 +99,28 @@ typedef struct {
     char name[120];         /**< human-readable name, e.g. "octal game .007" */
 } Rule;
 
+/** @brief How compute() computes the nim-values (command-line options of the same name). */
+typedef enum {
+    METHOD_BRUTE,    /**< `--brute`: grundy_brute(), one core */
+    METHOD_SPARSE,   /**< `--sparse`: grundy_sparse() where it applies, one core */
+    METHOD_BLOCKED,  /**< `--blocked` (default): extend_blocked(), all cores */
+    METHOD_VULKAN,   /**< `--gpu`: extend_device() with the Vulkan backend */
+    METHOD_ROCM,     /**< `--rocm`: extend_device() with the ROCm backend */
+    METHOD_RARE      /**< `--rare`: extend_rare(), Grossman's rare-value algorithm, one core */
+} Method;
+
+/** Short name of each Method, as used in messages and summary.txt. */
+static const char *const method_name[] = {"brute", "sparse", "blocked", "gpu", "rocm", "rare"};
+
+/** @brief Statistics of the rare-value method (for summary.txt and the benchmark). */
+typedef struct {
+    int active;               /**< the rare-value method was in use at the end */
+    unsigned mask;            /**< mask (valid if active) */
+    long nrare;               /**< rare heap sizes (valid if active) */
+    long long scan1, scan2;   /**< pairs examined in step 1 (rare heaps) and step 2 (witnesses) */
+    long long full;           /**< heap sizes where step 2 ran to the end (a new rare value) */
+} RareStats;
+
 /** @brief Result of compute(): the nim-sequence plus statistics. */
 typedef struct {
     uint16_t *G;         /**< G[0..N): nim-values (owned; free() it) */
@@ -105,7 +130,8 @@ typedef struct {
     unsigned mask;       /**< rare/common mask (valid if sparse) */
     long nrare;          /**< number of rare heap sizes (valid if sparse) */
     long long pairs;     /**< two-heap pairs examined (work counter) */
-    int blocked;         /**< blocked method used: 1 CPU, 2 GPU (Vulkan), 3 GPU (ROCm) */
+    Method method;       /**< method that was requested */
+    RareStats rare;      /**< statistics of METHOD_RARE */
     int threads;         /**< threads used by the blocked method */
 } Result;
 
@@ -638,6 +664,203 @@ static int extend_blocked(const Rule *R, uint16_t *G, long from, long to, int th
     return rc;
 }
 
+/* ------------------------------------- rare-value algorithm (Grossman 2017) */
+
+/**
+ * Rare-value algorithm: value @p v is *rare* iff popcount(v & mask) is EVEN.
+ *
+ * This is the convention of Winning Ways and of Grossman, "Searching for
+ * periodicity in Officers" (Games of No Chance 5, 2017).  The rare values form
+ * a group under XOR (0 is always rare) and the common values its other coset:
+ * rare^rare = rare, rare^common = common, common^common = rare.  (The older
+ * sparse mode above uses the opposite convention, see grundy_sparse().)
+ */
+static inline int rv_rare(unsigned v, unsigned mask) {
+    return !__builtin_parity(v & mask);
+}
+
+/**
+ * @brief Choose the rare-value mask: the one that makes the fewest heap sizes rare.
+ *
+ * Tries every mask 1 .. vcap-1 against the value histogram of G[1..n).
+ *
+ * @param G           nim-values
+ * @param n           number of values to consider
+ * @param vcap        power of two above the largest value
+ * @param rare_count  out: number of rare heap sizes in 1 .. n-1 for the chosen mask
+ * @return the chosen mask
+ */
+static unsigned rv_choose_mask(const uint16_t *G, long n, unsigned vcap, long *rare_count) {
+    long *cnt = xcalloc(vcap, sizeof *cnt);
+    for (long i = 1; i < n; i++) cnt[G[i]]++;
+    unsigned best = 1;
+    long bestc = -1;
+    for (unsigned m = 1; m < vcap; m++) {
+        long c = 0;
+        for (unsigned v = 0; v < vcap; v++)
+            if (cnt[v] && rv_rare(v, m)) c += cnt[v];
+        if (bestc < 0 || c < bestc) { bestc = c; best = m; }
+    }
+    free(cnt);
+    *rare_count = bestc < 0 ? 0 : bestc;
+    return best;
+}
+
+/**
+ * @brief Nim-value of heap size @p n with the rare-value algorithm (exact).
+ *
+ * Grossman 2017, Figure 2, generalised to any octal code:
+ *
+ * 1. Every *common* reachable value comes from a pair with a rare heap, so
+ *    looping over the rare heap sizes marks all of them (plus mark_simple() for
+ *    the 0-, 1- and 3-heap options).  The smallest unmarked common value,
+ *    `cval`, is therefore certainly not reachable.
+ * 2. G(n) = cval unless some rare value below cval is unreachable.  Scan all
+ *    pairs, counting down the unmarked rare values below cval, and stop as
+ *    soon as none is left.  Rare values come from almost every pair, so this
+ *    usually stops after a few thousand pairs.  If the scan ends with rare
+ *    values still unmarked, G(n) is the smallest of them (a new rare value).
+ *
+ * @param S      scratch; must have room for 2 * vcap + 2 values
+ * @param R      rule
+ * @param G      nim-values of all heap sizes < n
+ * @param n      heap size
+ * @param mask   rare-value mask, below the current vcap
+ * @param rare   ascending list of the heap sizes 1 .. n-1 with a rare value
+ * @param nrare  length of @p rare
+ * @param st     statistics, updated
+ * @return G(n)
+ */
+static unsigned grundy_rare(Scratch *S, const Rule *R, const uint16_t *G, long n, unsigned mask,
+                            const long *rare, long nrare, RareStats *st) {
+    uint32_t *seen = S->seen;
+    uint32_t stamp = (uint32_t)n;
+    mark_simple(S, R, G, n, stamp);
+    int tmax = R->t < n ? R->t : (int)n;
+    /* 1. all common reachable values: pairs (a, m-a) with a rare */
+    for (int k = 0; k <= tmax; k++) {
+        if (!(R->d[k] & 4)) continue;
+        long m = n - k;
+        if (m < 2) continue;
+        for (long i = 0; i < nrare && rare[i] < m; i++) {
+            long a = rare[i], b = m - a;
+            if (!pair_allowed(R, n, a, b)) continue;
+            seen[G[a] ^ G[b]] = stamp;
+        }
+        st->scan1 += nrare;
+    }
+    unsigned cval = 0;
+    while (seen[cval] == stamp || rv_rare(cval, mask)) cval++;
+    long need = 0;                      /* unmarked rare values below cval */
+    for (unsigned v = 0; v < cval; v++)
+        if (rv_rare(v, mask) && seen[v] != stamp) need++;
+    if (!need) return cval;
+    /* 2. find a witness pair for every rare value below cval */
+    for (int k = 0; k <= tmax; k++) {
+        if (!(R->d[k] & 4)) continue;
+        long m = n - k;
+        for (long a = 1; 2 * a <= m; a++) {
+            long b = m - a;
+            if (!pair_allowed(R, n, a, b)) continue;
+            unsigned x = G[a] ^ G[b];
+            st->scan2++;
+            if (x < cval && seen[x] != stamp) {
+                seen[x] = stamp;
+                if (--need == 0) return cval;
+            }
+        }
+    }
+    st->full++;
+    return mex(S, stamp);               /* the smallest unmarked rare value */
+}
+
+/** Fill @p rare (capacity *cap, grown) with the heap sizes 1 .. n-1 whose value is rare. */
+static long rv_collect(const uint16_t *G, long n, unsigned mask, long **rare, long *cap) {
+    long nr = 0;
+    for (long i = 1; i < n; i++)
+        if (rv_rare(G[i], mask)) {
+            if (nr == *cap) {
+                long c = *cap ? 2 * *cap : 1024;
+                long *p = realloc(*rare, (size_t)c * sizeof *p);
+                if (!p) return -1;
+                *rare = p;
+                *cap = c;
+            }
+            (*rare)[nr++] = i;
+        }
+    return nr;
+}
+
+/** The rare-value method is used while at most this fraction of heap sizes is rare. */
+#define RARE_MAX_FRACTION 0.05
+
+/**
+ * @brief Compute G[from..to) with the rare-value algorithm (single core, exact).
+ *
+ * Uses grundy_brute() until a mask makes at most RARE_MAX_FRACTION of the heap
+ * sizes rare, then grundy_rare().  The mask is (re)chosen at n = 2048, 8192,
+ * 32768, ... (and at @p from, if that is past 2048).  Gives the same values as
+ * grundy_brute() for every mask; the mask only affects the speed.
+ *
+ * @param R      rule
+ * @param G      array of at least @p to entries; G[0..from) valid
+ * @param from   first heap size to compute
+ * @param to     one past the last heap size
+ * @param pairs  incremented by the number of two-heap pairs examined
+ * @param st     statistics (may be NULL)
+ * @return 0, -2 (value > 65535) or -3 (out of memory)
+ */
+static int extend_rare(const Rule *R, uint16_t *G, long from, long to, long long *pairs, RareStats *st) {
+    RareStats dummy = {0};
+    if (!st) st = &dummy;
+    unsigned maxG = 0, vcap = 2;
+    for (long i = 0; i < from; i++)
+        if (G[i] > maxG) maxG = G[i];
+    while (vcap <= maxG) vcap *= 2;
+    Scratch S = {0};
+    if (scratch_reserve(&S, 2 * (size_t)vcap + 2)) return -3;
+    long *rare = NULL, nrare = 0, cap = 0;
+    unsigned mask = 0;
+    int active = 0, rc = 0;
+    long next_check = 2048;
+    while (next_check <= from) next_check *= 4;
+    for (long n = from; n < to && !rc; n++) {
+        /* (re)choose the mask at the checkpoints, and when starting late */
+        if ((n == from && n >= 2048) || n == next_check) {
+            long rcnt;
+            unsigned m = rv_choose_mask(G, n, vcap, &rcnt);
+            active = rcnt <= RARE_MAX_FRACTION * n;
+            if (active) {
+                mask = m;
+                nrare = rv_collect(G, n, mask, &rare, &cap);
+                if (nrare < 0) { rc = -3; break; }
+            }
+            if (n == next_check) next_check *= 4;
+        }
+        long long before = st->scan1 + st->scan2;
+        unsigned g = active ? grundy_rare(&S, R, G, n, mask, rare, nrare, st)
+                            : grundy_brute(&S, R, G, n, pairs);
+        if (active) *pairs += st->scan1 + st->scan2 - before;
+        rc = store_value(&S, G, n, g, &maxG, &vcap);
+        if (!rc && active && n >= 1 && rv_rare(g, mask)) {
+            if (nrare == cap) {
+                long c = cap ? 2 * cap : 1024;
+                long *p = realloc(rare, (size_t)c * sizeof *p);
+                if (!p) { rc = -3; break; }
+                rare = p;
+                cap = c;
+            }
+            rare[nrare++] = n;
+        }
+    }
+    st->active = active;
+    st->mask = active ? mask : 0;
+    st->nrare = active ? nrare : 0;
+    free(rare);
+    scratch_free(&S);
+    return rc;
+}
+
 /* ------------------------------------------------------------ GPU (Vulkan) */
 /* GPU backends share one driver, extend_device(); each backend only scans a
  * block (like block_scan()) on its device. */
@@ -1058,44 +1281,46 @@ static int extend_device(const Device *D, const Rule *R, uint16_t *G, long from,
 /**
  * @brief Compute G(0) .. G(N-1) (command-line program).
  *
- * Uses grundy_brute(), or grundy_sparse() when @p allow_sparse is set and a
- * mask makes fewer than 25% of heap sizes rare.  The mask is re-chosen at
+ * With METHOD_BLOCKED, METHOD_VULKAN or METHOD_ROCM it uses extend_blocked()
+ * or extend_device() in chunks.  Otherwise grundy_brute(), or with
+ * METHOD_SPARSE grundy_sparse() when a mask makes fewer than 25% of heap
+ * sizes rare.  The mask is re-chosen at
  * n = 2048, 8192, 32768, ...  Shows progress on stderr when it is a terminal.
  * Dies if a value exceeds 65535 or memory runs out (command-line use only; the
  * library uses octal_extend(), which returns error codes instead).
  *
  * @param R             rule
  * @param N             number of heap sizes
- * @param allow_sparse  enable the experimental sparse method
- * @param blocked       1: use extend_blocked(), 2: extend_device() with Vulkan,
- *                      3: with ROCm (ignores @p allow_sparse)
- * @param threads       threads for the blocked method, <= 0 for all
+ * @param method        how to compute
+ * @param threads       threads for METHOD_BLOCKED, <= 0 for all
  * @return the sequence and statistics; the caller frees Result.G
  */
-static Result compute(const Rule *R, long N, int allow_sparse, int blocked, int threads) {
+static Result compute(const Rule *R, long N, Method method, int threads) {
     Result res = {0};
     res.N = N;
     res.G = xcalloc((size_t)N, sizeof *res.G);
+    res.method = method;
     uint16_t *G = res.G;
-    if (blocked) {
+    int allow_sparse = method == METHOD_SPARSE;
+    if (method != METHOD_BRUTE && method != METHOD_SPARSE) {
         double t0 = now();
         int show = !quiet && isatty(2);
-        res.blocked = blocked;
         res.threads = block_threads(threads);
         for (long n = 0; n < N;) {
             long e = n + (n < 65536 ? 65536 : n / 8);
             if (e > N) e = N;
-            int rc = blocked == 2 ? extend_device(VULKAN_DEVICE, R, G, n, e, &res.pairs)
-                   : blocked == 3 ? extend_device(ROCM_DEVICE, R, G, n, e, &res.pairs)
-                                  : extend_blocked(R, G, n, e, threads, &res.pairs);
+            int rc = method == METHOD_VULKAN ? extend_device(VULKAN_DEVICE, R, G, n, e, &res.pairs)
+                   : method == METHOD_ROCM   ? extend_device(ROCM_DEVICE, R, G, n, e, &res.pairs)
+                   : method == METHOD_RARE   ? extend_rare(R, G, n, e, &res.pairs, &res.rare)
+                                             : extend_blocked(R, G, n, e, threads, &res.pairs);
             if (rc == -2) die("nim-value exceeds 65535; not supported");
-            if (rc == -4 && blocked == 2) die("no usable GPU (Vulkan), or not built with -DOCTAL_VULKAN");
+            if (rc == -4 && method == METHOD_VULKAN) die("no usable GPU (Vulkan), or not built with -DOCTAL_VULKAN");
             if (rc == -4) die("no usable ROCm GPU, or not built with -DOCTAL_ROCM");
             if (rc) die("out of memory");
             n = e;
             if (show)
                 fprintf(stderr, "\r  n = %ld / %ld  (%.0f%%, %s, %.0f s)   ", n, N, 100.0 * n / N,
-                        blocked == 3 ? "rocm" : blocked == 2 ? "gpu" : "blocked", now() - t0);
+                        method_name[method], now() - t0);
         }
         if (show) fprintf(stderr, "\r%78s\r", "");
         res.secs = now() - t0;
@@ -1819,6 +2044,14 @@ int octal_extend_blocked(const char *code, uint16_t *G, long from, long to, int 
     return extend_blocked(&R, G, from, to, threads, &pairs);
 }
 
+/** See octal.h.  Fill G[from..to) with extend_rare().  Returns 0, -1, -2, -3. */
+int octal_extend_rare(const char *code, uint16_t *G, long from, long to) {
+    Rule R;
+    if (parse_rule(code, &R)) return -1;
+    long long pairs = 0;
+    return extend_rare(&R, G, from, to, &pairs, NULL);
+}
+
 /** See octal.h.  Fill G[from..to) with extend_device() on Vulkan.  Returns 0,
  *  -1, -2, -3 like octal_extend(), or -4 if no GPU is usable. */
 int octal_extend_gpu(const char *code, uint16_t *G, long from, long to) {
@@ -1892,6 +2125,8 @@ static void usage(void) {
 "  -j THREADS  threads for --blocked (default: all cores)\n"
 "  --gpu       blocked method with the parallel part on the GPU (Vulkan)\n"
 "  --rocm      same, on an AMD GPU with ROCm (HIP)\n"
+"  --rare      rare-value algorithm (Grossman 2017), one core; much faster for\n"
+"              games with few rare values (.6, grundy, couples), not for .007\n"
 "  --check     compare the chosen method (default --blocked) with brute force\n"
 "  -p          print the sequence to stdout and skip output files\n"
 "  -q          quiet\n");
@@ -1908,11 +2143,13 @@ static void usage(void) {
  */
 int main(int argc, char **argv) {
     long N = 10000, embed = 200000;
-    int W = 0, L = 1000, sparse = 0, check = 0, print = 0, blocked = 1, threads = 0;
+    int W = 0, L = 1000, check = 0, print = 0, threads = 0;
+    Method method = METHOD_BLOCKED;
     const char *dir = NULL;
     static struct option lo[] = {{"brute", no_argument, 0, 'b'}, {"sparse", no_argument, 0, 's'},
                                  {"check", no_argument, 0, 'c'}, {"blocked", no_argument, 0, 'B'},
                                  {"gpu", no_argument, 0, 'G'}, {"rocm", no_argument, 0, 'R'},
+                                 {"rare", no_argument, 0, 'A'},
                                  {"help", no_argument, 0, 'h'}, {0, 0, 0, 0}};
     int c;
     while ((c = getopt_long(argc, argv, "n:o:w:L:e:j:pqh", lo, NULL)) != -1) {
@@ -1922,12 +2159,13 @@ int main(int argc, char **argv) {
         case 'w': W = atoi(optarg); break;
         case 'L': L = atoi(optarg); break;
         case 'e': embed = atol(optarg); break;
-        case 'b': sparse = 0; blocked = 0; break;
-        case 's': sparse = 1; blocked = 0; break;
+        case 'b': method = METHOD_BRUTE; break;
+        case 's': method = METHOD_SPARSE; break;
         case 'c': check = 1; break;
-        case 'B': blocked = 1; sparse = 0; break;
-        case 'G': blocked = 2; sparse = 0; break;
-        case 'R': blocked = 3; sparse = 0; break;
+        case 'B': method = METHOD_BLOCKED; break;
+        case 'G': method = METHOD_VULKAN; break;
+        case 'R': method = METHOD_ROCM; break;
+        case 'A': method = METHOD_RARE; break;
         case 'j': threads = atoi(optarg); break;
         case 'p': print = 1; break;
         case 'q': quiet = 1; break;
@@ -1939,25 +2177,28 @@ int main(int argc, char **argv) {
     Rule R;
     if (parse_rule(argv[optind], &R)) die("cannot parse code (examples: .007  0.6  .137  4.  grundy)");
 
-    Result res = compute(&R, N, !blocked && sparse, blocked, threads);
+    Result res = compute(&R, N, method, threads);
 
     if (check) {
-        Result b = compute(&R, N, 0, 0, 0);
-        const char *m = blocked == 3 ? "rocm" : blocked == 2 ? "gpu" : blocked ? "blocked"
-                      : sparse ? "sparse" : "brute";
+        Result b = compute(&R, N, METHOD_BRUTE, 0);
+        const char *m = method_name[method];
         for (long n = 0; n < N; n++)
             if (b.G[n] != res.G[n]) {
                 printf("MISMATCH at n = %ld: %s %u, brute %u\n", n, m, res.G[n], b.G[n]);
                 return 1;
             }
-        if (blocked >= 2 || (!blocked && !sparse))
-            printf("check OK: %s, n < %ld, %s %.2f s, brute %.2f s\n", R.code, N, m, res.secs, b.secs);
-        else if (blocked)
+        if (method == METHOD_BLOCKED)
             printf("check OK: %s, n < %ld, blocked %.2f s (%d threads), brute %.2f s\n", R.code, N,
                    res.secs, res.threads, b.secs);
-        else
+        else if (method == METHOD_SPARSE)
             printf("check OK: %s, n < %ld, sparse %.2f s (%s), brute %.2f s\n", R.code, N, res.secs,
                    res.sparse ? "active" : "inactive", b.secs);
+        else if (method == METHOD_RARE)
+            printf("check OK: %s, n < %ld, rare %.2f s (%s, mask 0x%x, %ld rare heaps), brute %.2f s\n",
+                   R.code, N, res.secs, res.rare.active ? "active" : "inactive", res.rare.mask, res.rare.nrare,
+                   b.secs);
+        else
+            printf("check OK: %s, n < %ld, %s %.2f s, brute %.2f s\n", R.code, N, m, res.secs, b.secs);
         return 0;
     }
 
@@ -2023,10 +2264,18 @@ int main(int argc, char **argv) {
         if (!g) continue;
         fprintf(g, "%s\n", R.name);
         fprintf(g, "heap sizes      0 .. %ld\n", N - 1);
-        if (res.blocked >= 2)
-            fprintf(g, "time            %.2f s (%s)\n", res.secs, res.blocked == 3 ? "rocm" : "gpu");
-        else if (res.blocked)
+        if (res.method == METHOD_VULKAN || res.method == METHOD_ROCM)
+            fprintf(g, "time            %.2f s (%s)\n", res.secs, method_name[res.method]);
+        else if (res.method == METHOD_BLOCKED)
             fprintf(g, "time            %.2f s (blocked, %d threads)\n", res.secs, res.threads);
+        else if (res.method == METHOD_RARE) {
+            fprintf(g, "time            %.2f s (rare-value algorithm, %s)\n", res.secs,
+                    res.rare.active ? "active" : "inactive: no mask with few rare values");
+            if (res.rare.active)
+                fprintf(g, "rare values     mask 0x%x, %ld rare heap sizes; pairs examined %lld (rare heaps) "
+                        "+ %lld (witnesses), %lld full scans\n", res.rare.mask, res.rare.nrare,
+                        res.rare.scan1, res.rare.scan2, res.rare.full);
+        }
         else
             fprintf(g, "time            %.2f s (%s)\n", res.secs, res.sparse ? "sparse-space" : "brute force");
         if (res.sparse)
