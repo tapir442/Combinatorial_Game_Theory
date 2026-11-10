@@ -68,19 +68,52 @@ values **are** reachable, which can stop early.
 
 ## Speculation (Grossman §3.1)
 
-Step 2 is about 60% of the work, and it almost never changes the result.  So `rare_spec_chunk`
+Step 2 is about 60% of the work, and it almost never changes the result.  So `rare_spec_run`
 works on chunks of \(n/8\) heap sizes (between 4096 and 2¹⁸, ending at the next mask checkpoint):
 
-1. **Speculate** on one core: compute every value of the chunk with step 1 only, that is,
-   assume that no new rare value appears.  Speculative values are always common.
-2. **Check** in parallel: recompute every value of the chunk with the full algorithm, taking
-   the speculative values before it as given.  Given those values, the heap sizes are
-   independent, so the check runs on all threads (OpenMP), each with its own mark table.
+1. **Speculate** on one thread (`rare_speculate`): compute every value of the chunk with step 1
+   only, that is, assume that no new rare value appears.  Speculative values are always common.
+2. **Check** in parallel (`rare_check_worker`): recompute every value of the chunk with the full
+   algorithm, taking the speculative values before it as given.  Given those values, the heap
+   sizes are independent, so the threads share them out in blocks of 64, each with its own
+   mark table.
 3. If every value agrees, all are correct, by induction over \(n\).  Otherwise let \(f\) be
    the first heap size that disagrees.  The values before \(f\) are correct, so the value the
    check computed for \(f\) is correct too: it is a new rare value.  It is stored and added to
    the rare list, and speculation resumes at \(f + 1\); the speculative values after \(f\)
    are thrown away.
+
+**Overlap.**  Steps 1 and 2 run at the same time on consecutive chunks: while the other
+threads check chunk A, thread 0 already speculates the next chunk B, assuming A is correct,
+and then joins the check.  This is safe because checking A reads only values below the end of
+A and speculating B writes only values from there on.  If A is correct, B becomes the next
+chunk to check, overlapped with the speculation of the one after.  If A is wrong, B is thrown
+away with the rest of A, and the next chunk is speculated on its own.  So the speculation,
+which is sequential, runs almost without pause, and the check is hidden behind it.
+
+**Effect of the overlap** (same machine, 24 threads, identical values; seconds):
+
+| code | n | speculation, then check | overlapped |
+|---|---:|---:|---:|
+| `.6` | 10⁷ | 14.8 | 14.9 |
+| `grundy` | 10⁷ | 12.1 | 11.4 |
+| `couples` | 10⁷ | 16.1 | 12.8 |
+
+The gain is small (0–20%), because the check was already cheap: spread over 23 threads it
+costs much less than the speculation.  Timing the speculating thread for `.6` to 10⁷: 13.0 s
+of the 15.4 s are speculation, and it waits for the check only 1.8 s in all (mostly at the
+first chunk after each mask checkpoint, where there is nothing to overlap).  So the
+**sequential speculation, about 1.3 µs per value, is now the bottleneck**; that is what
+Grossman's remaining optimisations below address.
+
+OpenMP's waiting policy matters: with `OMP_WAIT_POLICY=active` idle checking threads spin and
+slow down the speculating thread on the same physical core (18.6 s instead of 14.9 s for `.6`
+to 10⁷).  The default (spin briefly, then sleep) is fine; `OMP_WAIT_POLICY=passive` is slightly
+faster (14.0 s).
+
+If storing a speculative value fails (a value above 65535, or out of memory), the chunk ends
+there; when that heap size comes up again as the first of a chunk, it is computed exactly
+instead, so an error is only reported for a correct value.
 
 So speculation is **exact** as well.  Grossman checked the intervals on a cluster; here the
 cores of one machine do it.  It starts at \(n = 4096\) once a mask is active; `-j 1` turns it
@@ -119,25 +152,26 @@ all 24 threads.
 
 | code | n | brute | blocked | gpu (Vulkan) | rocm | rare -j 1 | **rare** |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `.6` | 10⁵ | 1.55 | 0.12 | 0.23 | 0.43 | 0.60 | 0.35 |
-| `.6` | 3·10⁵ | 13.1 | 0.90 | 2.00 | 2.14 | 1.80 | **0.59** |
-| `.6` | 10⁶ | – | 9.53 | 22.7 | 19.9 | 6.43 | **1.80** |
-| `.6` | 10⁷ | – | – | – | – | 60.9 | **15.2** |
-| `grundy` | 10⁶ | – | 8.91 | 22.4 | 20.4 | 5.38 | **1.41** |
-| `grundy` | 10⁷ | – | – | – | – | 54.0 | **13.3** |
-| `couples` | 10⁶ | – | 9.57 | 22.7 | 20.8 | 5.57 | **1.64** |
-| `couples` | 10⁷ | – | – | – | – | 56.1 | **14.1** |
-| `.007` | 3·10⁵ | 12.8 | 1.12 | 2.14 | 2.27 | 13.0 | 12.9 (falls back to brute) |
-| `.007` | 10⁶ | – | 9.88 | 23.2 | 19.8 | – | – |
+| `.6` | 10⁵ | 1.55 | 0.19 | 0.25 | 0.45 | 0.61 | 0.34 |
+| `.6` | 3·10⁵ | 13.1 | 1.01 | 1.93 | 2.14 | 1.83 | **0.62** |
+| `.6` | 10⁶ | – | 9.04 | 22.9 | 19.6 | 6.13 | **1.76** |
+| `.6` | 10⁷ | – | – | – | – | 61.1 | **14.0** |
+| `grundy` | 10⁶ | – | 9.13 | 22.3 | 19.3 | 5.36 | **1.46** |
+| `grundy` | 10⁷ | – | – | – | – | 53.4 | **11.6** |
+| `couples` | 10⁶ | – | 9.90 | 22.7 | 19.5 | 5.68 | **1.63** |
+| `couples` | 10⁷ | – | – | – | – | 59.2 | **13.3** |
+| `.007` | 3·10⁵ | 13.5 | 1.34 | 2.11 | 2.26 | 13.4 | 13.2 (falls back to brute) |
+| `.007` | 10⁶ | – | 9.85 | 23.1 | 20.9 | – | – |
 
 The full table, with all sizes, is in `benchmarks/results/methods.md`.
 
 - For the three sparse games the plain rare-value algorithm runs at an almost constant
   **≈ 170,000 values per second** on one core (10⁶ → 10⁷ takes 10× as long, not 100×).  Grossman
   reports 88,000 values/s for the same algorithm on a 2008 Xeon.
-- **Speculation** makes it 3.6–4.1× faster again: **≈ 660,000–750,000 values per second**.
-  Grossman's speculation gave 2.2× (196,000 values/s); here the check also runs on all cores.
-- At \(n = 10^6\), `rare` is 5–6× faster than `blocked` on all 24 threads, and about 80× faster
+- **Speculation** with overlapping check makes it 4.4–4.6× faster again: **≈ 710,000–860,000
+  values per second**.  Grossman's speculation gave 2.2× (196,000 values/s); here the check
+  also runs on all cores, at the same time as the speculation.
+- At \(n = 10^6\), `rare` is 5–6.3× faster than `blocked` on all 24 threads, and about 80× faster
   than brute force (143 s for `.6`).  At \(10^7\) the O(n²) methods would need roughly 100× their
   10⁶ time (about 1000 s for `blocked`), so `rare` is then about 60× faster than `blocked`, and
   the gap keeps growing with \(n\).
@@ -150,10 +184,8 @@ The full table, with all sizes, is in `benchmarks/results/methods.md`.
 
 ## Not implemented yet (Grossman §3)
 
-Grossman's further speed-ups, about 60× in total together with speculation:
+Grossman's further speed-ups, about 60× in total together with speculation and overlap:
 
-- **Overlapping speculation and check.**  Here the next chunk is speculated only after the
-  check of the current one; running both at the same time would hide most of the check.
 - **One byte per value.**  All Officers values are below 512, and for a common value bit 8
   follows from the others, so values fit in a byte and the mark array has 256 entries.
 - **Generated, fully unrolled code** for step 1 and for the mex search: the rare heap sizes

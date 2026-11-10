@@ -107,9 +107,10 @@ int octal_extend_blocked(const char *code, uint16_t *G, long from, long to, int 
  *
  * With @p threads == 1 it runs the plain algorithm on one core.  Otherwise it
  * uses Grossman's speculation (section 3.1): it computes chunks with step 1
- * only, assuming no new rare values, and then checks every value of the chunk
- * with the full algorithm in parallel; if a value is wrong, the values before it
- * are still correct, the wrong one is replaced, and speculation resumes after it.
+ * only, assuming no new rare values, and checks every value of the chunk with
+ * the full algorithm in parallel, overlapped with the speculation of the next
+ * chunk; if a value is wrong, the values before it are still correct, the wrong
+ * one is replaced, and speculation resumes after it.
  *
  * J.P. Grossman, "Searching for periodicity in Officers", Games of No Chance 5,
  * MSRI Publications 70 (2017), 373-385.

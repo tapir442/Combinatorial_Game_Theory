@@ -734,7 +734,7 @@ static unsigned rv_choose_mask(const uint16_t *G, long n, unsigned vcap, long *r
  *
  * Leaves the marks in @p S (stamp n) for step 2.  On its own this is the
  * *speculative* value of Grossman section 3.1: G(n) under the assumption that
- * no rare value below cval is unreachable (see rare_spec_chunk()).  The result
+ * no rare value below cval is unreachable (see rare_spec_run()).  The result
  * is always a common value.
  *
  * @param S      scratch; must have room for 2 * vcap + 2 values
@@ -842,99 +842,228 @@ static long rv_collect(const uint16_t *G, long n, unsigned mask, long **rare, lo
 /** Speculation starts once the rare-value method is active and n is at least this. */
 #define RARE_SPEC_MIN 4096
 
+/** Speculation chunk that starts at heap size @p x: n/8 heap sizes (4096 .. 2^18), ending at @p end at the latest. */
+static long rare_chunk_end(long x, long end) {
+    long len = x / 8;
+    if (len < 4096) len = 4096;
+    if (len > (1L << 18)) len = 1L << 18;
+    return x + len < end ? x + len : end;
+}
+
 /**
- * @brief One round of speculation (Grossman 2017, section 3.1) on [n0, e).
+ * @brief Speculate G[n0..e): step 1 only (rare_step1()), assuming no new rare value.
  *
- * 1. **Speculate** (one core): G(n) = rare_step1() for n0 <= n < e, i.e. assume
- *    that no new rare value appears.  These values are always common.
- * 2. **Check** (@p nt threads): recompute every G(n) of the chunk with the full
- *    grundy_rare(), taking the speculative values before n as given.  The heap
- *    sizes are independent, so this runs in parallel.
+ * Sequential, since each value depends on the previous ones.  Speculative
+ * values are always common, so the rare list does not change.
  *
- * If all values agree they are all correct (induction over n).  Otherwise let f
- * be the first heap size that disagrees: the values before f are correct, so
- * the value the check computed for f is correct too.  G(f) is set to it (it is
- * a new rare value) and the caller continues at f + 1; the speculative values
- * after f are discarded.
- *
- * @param S      main scratch (grown as values grow)
+ * @param S      scratch of the speculating thread (grown as values grow)
  * @param R      rule
- * @param G      nim-values; G[0..n0) correct, G[n0..e) is written
- * @param n0     first heap size of the chunk
- * @param e      one past the last heap size of the chunk
+ * @param G      nim-values; G[0..n0) are taken as given, G[n0..e) is written
+ * @param n0     first heap size
+ * @param e      one past the last heap size
  * @param mask   rare-value mask
  * @param rare   rare heap sizes < n0
  * @param nrare  length of @p rare
  * @param maxG   in/out: largest value so far
  * @param vcap   in/out: power of two above @p maxG
- * @param nt     number of threads for the check
- * @param st     statistics, updated
- * @param next   out: first heap size that is not yet known to be correct
- * @return 0, -2 or -3 (see store_value())
+ * @param st     statistics: scan1 and speculated are incremented
+ * @param rc     out: set to the store_value() error (-2 or -3) if one occurs
+ * @return the end of the speculated range: @p e, or the heap size where store_value() failed
  */
-static int rare_spec_chunk(Scratch *S, const Rule *R, uint16_t *G, long n0, long e, unsigned mask,
-                           const long *rare, long nrare, unsigned *maxG, unsigned *vcap, int nt,
-                           RareStats *st, long *next) {
-    unsigned maxG0 = *maxG, vcap0 = *vcap;
-    /* 1. speculate: step 1 only, sequentially (each value depends on the previous
-     *    ones).  The rare list stays the same: speculative values are common. */
-    for (long n = n0; n < e; n++) {
-        int rc = store_value(S, G, n, rare_step1(S, R, G, n, mask, rare, nrare, st), maxG, vcap);
-        if (rc) { *next = n; return rc; }
+static long rare_speculate(Scratch *S, const Rule *R, uint16_t *G, long n0, long e, unsigned mask,
+                           const long *rare, long nrare, unsigned *maxG, unsigned *vcap, RareStats *st,
+                           int *rc) {
+    long n = n0;
+    for (; n < e; n++) {
+        int r = store_value(S, G, n, rare_step1(S, R, G, n, mask, rare, nrare, st), maxG, vcap);
+        if (r) { *rc = r; break; }
     }
-    st->speculated += e - n0;
+    st->speculated += n - n0;
+    return n;
+}
 
-    /* 2. check: the full algorithm for every heap size of the chunk, reading the
-     *    speculative values before it.  The heap sizes are independent, so they
-     *    are spread over the threads; G is only read here.  Each thread has its
-     *    own mark table and statistics.  Only the smallest wrong heap size
-     *    matters, so heap sizes above the smallest one found so far are skipped. */
-    long bad = e;                 /* first heap size whose speculative value is wrong */
-    unsigned badval = 0;
-    size_t need = 2 * (size_t)*vcap + 2;
-    int oom = 0;
-#pragma omp parallel num_threads(nt)
-    {
-        Scratch T = {0};
-        RareStats loc = {0};
-        int ok = scratch_reserve(&T, need) == 0;
-        if (!ok) {
+/**
+ * @brief Check part of the speculation: run by every checking thread.
+ *
+ * Recomputes G(n) for heap sizes of [n0, e) with the full grundy_rare(), taking
+ * the speculative values before n as given, and records the smallest heap size
+ * whose speculative value is wrong.  The heap sizes are independent, so the
+ * threads take blocks of 64 from the shared @p cursor; a thread that joins late
+ * (the speculating one) simply takes what is left.  Heap sizes above the
+ * smallest wrong one found so far are skipped: only that one matters.
+ * Reads G[0..e) only.
+ *
+ * @param R       rule
+ * @param G       nim-values; G[0..e) speculative or correct
+ * @param e       one past the last heap size to check (the first one is the
+ *                initial value of @p cursor)
+ * @param mask    rare-value mask
+ * @param rare    rare heap sizes < n0
+ * @param nrare   length of @p rare
+ * @param need    size of the thread's own mark table (2 * vcap + 2)
+ * @param cursor  shared: next heap size to hand out (atomic)
+ * @param bad     shared: smallest wrong heap size found so far (e if none)
+ * @param badval  shared: the correct value G(*bad)
+ * @param oom     shared: set to 1 if the mark table cannot be allocated
+ * @param st      shared statistics: scan1, scan2 and full are added (in a critical section)
+ */
+static void rare_check_worker(const Rule *R, const uint16_t *G, long e, unsigned mask,
+                              const long *rare, long nrare, size_t need, long *cursor, long *bad,
+                              unsigned *badval, int *oom, RareStats *st) {
+    Scratch T = {0};
+    RareStats loc = {0};
+    if (scratch_reserve(&T, need)) {
 #pragma omp atomic write
-            oom = 1;
-        }
-#pragma omp for schedule(dynamic, 64)
-        for (long n = n0; n < e; n++) {
-            long b;
+        *oom = 1;
+    } else {
+        for (;;) {
+            long start, b;
+#pragma omp atomic capture
+            { start = *cursor; *cursor += 64; }
 #pragma omp atomic read
-            b = bad;
-            if (!ok || n > b) continue;        /* only heap sizes before the first error matter */
-            unsigned g = grundy_rare(&T, R, G, n, mask, rare, nrare, &loc);
-            if (g != G[n]) {
+            b = *bad;
+            if (start >= e || start > b) break;
+            long stop = start + 64 < e ? start + 64 : e;
+            for (long n = start; n < stop && n <= b; n++) {
+                unsigned g = grundy_rare(&T, R, G, n, mask, rare, nrare, &loc);
+                if (g != G[n]) {
 #pragma omp critical(octal_rare_bad)
-                if (n < bad) { bad = n; badval = g; }
+                    if (n < *bad) { *bad = n; *badval = g; }
+                    break;
+                }
             }
         }
-#pragma omp critical(octal_rare_stats)
-        {
-            st->scan1 += loc.scan1;
-            st->scan2 += loc.scan2;
-            st->full += loc.full;
-        }
-        scratch_free(&T);
     }
-    if (oom) { *next = n0; return -3; }
-    /* 3. all values agree: by induction over n they are all correct */
-    if (bad == e) { *next = e; return 0; }
-    /* G[n0..bad) are correct; badval is the true G(bad).  Forget the larger
-     * speculative values when tracking the maximum. */
-    st->restarts++;
-    *maxG = maxG0;
-    *vcap = vcap0;
-    for (long n = n0; n < bad; n++)
-        if (G[n] > *maxG) *maxG = G[n];
-    while (*vcap <= *maxG) *vcap *= 2;
-    *next = bad + 1;
-    return store_value(S, G, bad, badval, maxG, vcap);
+#pragma omp critical(octal_rare_stats)
+    {
+        st->scan1 += loc.scan1;
+        st->scan2 += loc.scan2;
+        st->full += loc.full;
+    }
+    scratch_free(&T);
+}
+
+/** Append heap size @p n to the rare list.  0, or -3 if out of memory. */
+static int rare_append(long **rare, long *nrare, long *cap, long n) {
+    if (*nrare == *cap) {
+        long c = *cap ? 2 * *cap : 1024;
+        long *p = realloc(*rare, (size_t)c * sizeof *p);
+        if (!p) return -3;
+        *rare = p;
+        *cap = c;
+    }
+    (*rare)[(*nrare)++] = n;
+    return 0;
+}
+
+/**
+ * @brief Speculation with overlapping check (Grossman 2017, section 3.1) on [n, end).
+ *
+ * The heap sizes are handled in chunks (rare_chunk_end()).  Chunk A is
+ * speculated (rare_speculate()); then, in one parallel region,
+ *
+ * - thread 0 speculates the next chunk B, assuming that A is correct, and then
+ *   joins the check;
+ * - all other threads check A (rare_check_worker()).
+ *
+ * This is safe: checking A reads only G below the end of A, and speculating B
+ * writes only G from there on.
+ *
+ * - If every value of A agrees, A is correct (induction over n), and B becomes
+ *   the chunk to check next, overlapped with the speculation of the one after.
+ * - Otherwise let f be the first wrong heap size.  The values before f are
+ *   correct, so the value the check computed for f is correct too: a new rare
+ *   value.  It is stored and appended to the rare list; the rest of A and all of
+ *   B are discarded, and speculation starts again at f + 1, without overlap.
+ *
+ * If storing a speculative value fails (store_value(): value > 65535, or out of
+ * memory), the chunk ends there.  When the failing heap size comes up again as
+ * the first one of a chunk, it is computed exactly with grundy_rare() instead,
+ * so an error is only returned for a correct value.
+ *
+ * Performance (Ryzen 9 7900X, 24 threads, .6 to 10^7): 14 s, against 15 s
+ * without the overlap and 61 s for the plain algorithm.  Spread over the
+ * other threads the check is cheap, so the speculating thread is busy about
+ * 85% of the time; the sequential speculation (about 1.3 us per value) is the
+ * limit.  Idle checking threads must not spin on thread 0's physical core:
+ * OMP_WAIT_POLICY=active costs about 25%, the default and "passive" are fine.
+ *
+ * @param S      main scratch (used by thread 0)
+ * @param R      rule
+ * @param G      nim-values; G[0..n) correct, G[n..end) is written
+ * @param n      first heap size
+ * @param end    one past the last heap size
+ * @param mask   rare-value mask
+ * @param rare   in/out: rare heap sizes (new ones are appended)
+ * @param nrare  in/out: length of *rare
+ * @param cap    in/out: capacity of *rare
+ * @param maxG   in/out: largest value so far
+ * @param vcap   in/out: power of two above @p maxG
+ * @param nt     number of threads (at least 2 to overlap anything; with one,
+ *               thread 0 speculates B and then checks A alone)
+ * @param st     statistics, updated
+ * @return 0, -2 (value > 65535) or -3 (out of memory); G is correct below the
+ *         heap size where it stopped
+ */
+static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long end, unsigned mask,
+                         long **rare, long *nrare, long *cap, unsigned *maxG, unsigned *vcap, int nt,
+                         RareStats *st) {
+    long a0 = n, a1 = n;            /* chunk A = [a0, a1): speculated, not yet checked */
+    unsigned maxA = *maxG, vcapA = *vcap;   /* maxG and vcap over G[0..a0) */
+    while (a0 < end) {
+        int rc = 0;
+        if (a1 == a0) {             /* nothing pending: speculate A on its own */
+            maxA = *maxG;
+            vcapA = *vcap;
+            a1 = rare_speculate(S, R, G, a0, rare_chunk_end(a0, end), mask, *rare, *nrare, maxG, vcap, st, &rc);
+            if (a1 == a0) {         /* storing failed at a0 itself: compute it exactly */
+                unsigned g = grundy_rare(S, R, G, a0, mask, *rare, *nrare, st);
+                if ((rc = store_value(S, G, a0, g, maxG, vcap))) return rc;
+                if (rv_rare(g, mask) && (rc = rare_append(rare, nrare, cap, a0))) return rc;
+                a1 = ++a0;
+                continue;
+            }
+        }
+        /* speculate B = [a1, b1) while A is checked; not after a failed store */
+        long b1 = rc ? a1 : rare_chunk_end(a1, end), bend = a1;
+        unsigned maxB = *maxG, vcapB = *vcap;   /* over G[0..a1), for when B becomes A */
+        size_t need = 2 * (size_t)*vcap + 2;
+        long cursor = a0, bad = a1;
+        unsigned badval = 0;
+        int oom = 0, rcB = 0;
+        RareStats specst = {0};
+#pragma omp parallel num_threads(nt)
+        {
+            int tid = 0;
+#ifdef _OPENMP
+            tid = omp_get_thread_num();
+#endif
+            if (tid == 0 && b1 > a1)
+                bend = rare_speculate(S, R, G, a1, b1, mask, *rare, *nrare, maxG, vcap, &specst, &rcB);
+            rare_check_worker(R, G, a1, mask, *rare, *nrare, need, &cursor, &bad, &badval, &oom, st);
+        }
+        st->scan1 += specst.scan1;
+        st->speculated += specst.speculated;
+        if (oom) return -3;
+        if (bad == a1) {            /* A is correct; B (if any) is the next chunk to check */
+            a0 = a1;
+            a1 = bend;
+            maxA = maxB;
+            vcapA = vcapB;
+            continue;
+        }
+        /* A is wrong at `bad`: keep G[a0..bad), store the correct G(bad), drop the rest */
+        st->restarts++;
+        *maxG = maxA;
+        *vcap = vcapA;
+        for (long i = a0; i < bad; i++)
+            if (G[i] > *maxG) *maxG = G[i];
+        while (*vcap <= *maxG) *vcap *= 2;
+        if ((rc = store_value(S, G, bad, badval, maxG, vcap))) return rc;
+        if (rv_rare(badval, mask) && (rc = rare_append(rare, nrare, cap, bad))) return rc;
+        a0 = a1 = bad + 1;
+    }
+    return 0;
 }
 
 /** The rare-value method is used while at most this fraction of heap sizes is rare. */
@@ -949,8 +1078,9 @@ static int rare_spec_chunk(Scratch *S, const Rule *R, uint16_t *G, long n0, long
  * same values as grundy_brute() for every mask; the mask only affects the speed.
  *
  * With one thread it runs grundy_rare() for every heap size.  With more, from
- * RARE_SPEC_MIN on it uses speculation (rare_spec_chunk()): step 1 on one core,
- * the full check in parallel, in chunks of n/8 heap sizes (4096 .. 2^18).
+ * RARE_SPEC_MIN on it uses speculation with overlapping check (rare_spec_run()):
+ * step 1 on one thread, the full check of the previous chunk on the others at
+ * the same time, in chunks of n/8 heap sizes (4096 .. 2^18).
  *
  * @param R        rule
  * @param G        array of at least @p to entries; G[0..from) valid
@@ -992,30 +1122,13 @@ static int extend_rare(const Rule *R, uint16_t *G, long from, long to, int threa
             if (n == next_check) next_check *= 4;
         }
         if (active && nt > 1 && n >= RARE_SPEC_MIN) {
-            /* speculation: chunks of n/8 heap sizes (4096 .. 2^18); a chunk ends at
-             * the next mask checkpoint at the latest, so the mask is re-chosen there */
-            long len = n / 8;
-            if (len < 4096) len = 4096;
-            if (len > (1L << 18)) len = 1L << 18;
-            long e = n + len;
-            if (e > to) e = to;
-            if (e > next_check) e = next_check;
-            long long before = st->scan1 + st->scan2, restarts = st->restarts;
-            long next;
-            rc = rare_spec_chunk(&S, R, G, n, e, mask, rare, nrare, &maxG, &vcap, nt, st, &next);
+            /* speculation with overlapping check up to the next mask checkpoint,
+             * where the loop re-chooses the mask */
+            long end = to < next_check ? to : next_check;
+            long long before = st->scan1 + st->scan2;
+            rc = rare_spec_run(&S, R, G, n, end, mask, &rare, &nrare, &cap, &maxG, &vcap, nt, st);
             *pairs += st->scan1 + st->scan2 - before;
-            /* after a failed check, G(next-1) is the new rare value that caused it */
-            if (!rc && st->restarts > restarts && rv_rare(G[next - 1], mask)) {
-                if (nrare == cap) {
-                    long c = cap ? 2 * cap : 1024;
-                    long *p = realloc(rare, (size_t)c * sizeof *p);
-                    if (!p) { rc = -3; break; }
-                    rare = p;
-                    cap = c;
-                }
-                rare[nrare++] = next - 1;
-            }
-            n = next - 1;   /* the loop's n++ continues at next */
+            n = end - 1;   /* the loop's n++ continues at end */
             continue;
         }
         long long before = st->scan1 + st->scan2;

@@ -103,8 +103,9 @@ int octal_extend_rare(const char *code, uint16_t *G, long from, long to, int thr
 ```
 
 Same contract and values as `octal_extend`, with the rare-value algorithm (Grossman 2017).
-`threads == 1` runs the plain algorithm on one core; otherwise it speculates on one core and
-checks in parallel on `threads` threads (≤ 0: all cores).  Fast for games with few rare values;
+`threads == 1` runs the plain algorithm on one core; otherwise it speculates on one thread and
+checks the previous chunk on the others at the same time (`threads` threads in all; ≤ 0: all
+cores).  Fast for games with few rare values;
 for other games it falls back to brute force.
 See [Rare-value algorithm](rare-values.md).
 
