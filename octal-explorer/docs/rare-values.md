@@ -175,9 +175,42 @@ The method needs a game whose rare heap sizes stop appearing.  Rare heap sizes a
 | `.164` | `0x1e60` | 77,499 (39%) | 199,999 | no |
 | `.07`, `.137` | `0x9` | 82,355 (41%) | 199,997 | no (periodic; small values) |
 
+| `.106` | (none) | about 50% for every mask | 999,999 | no, but see [sparse positions](#sparse-positions-flammenkamp-106) |
+
 So the rare-value algorithm does **not** help Treblecross: about 10% of its heap sizes are
 rare under the best mask, and new ones keep appearing.  Flammenkamp's computation of `.007`
 to 2²⁵ must rely on something else.
+
+## Sparse positions (Flammenkamp; `.106`) — planned
+
+Some games have a sparse **position** space instead of a sparse value space (type 1 in
+[Flammenkamp's table](https://wwwhomes.uni-bielefeld.de/achim/octal.html); definition on his
+[sparse-space page](https://wwwhomes.uni-bielefeld.de/achim/octal_sparse.html)).  For a code with
+exactly one digit greater than 3, at index \(t\), heap size \(n\) is *sparse* if
+\(\operatorname{popcount}(G(n) \mathbin{\&} m) \equiv n - t \pmod 2\).
+
+Then every two-heap option has \(a + b = n - t\), and with \(q(x)\) the parity of
+\(G(x) \mathbin{\&} m\), two non-sparse positions give \(q(a) \oplus q(b) = (a + b) \bmod 2 = (n - t)
+\bmod 2\): exactly the class that would make \(n\) sparse.  So the values of the other class come
+only from pairs with a sparse position: the rare-value algorithm applies, with the rare class
+depending on the parity of \(n\).
+
+`.106` (Flammenkamp 2002: period 328,226,140,474, preperiod 465,384,263,797; OEIS A071458) is such
+a game.  Our values up to 10⁶ confirm his table: with \(m = 13\) (`0xd`) and \(t = 3\) there are
+exactly **15 sparse positions** (3, 7, 10, 26, 68, 84, 96, 101, 320, 345, 359, 473, 563, 993, 1103),
+the last at 1103.  Under every value mask about half of the heap sizes are rare, which is why
+`--rare` falls back to brute force for `.106` (154 s for 10⁶).
+
+Plan, not implemented yet:
+
+1. Let `--rare` choose between value masks and position masks (rare class
+   \(q(v) = (n - t) \bmod 2\)).  Step 1 would then cost 15 pairs per heap size for `.106`.
+2. A sliding window: Flammenkamp (OEIS A071458) notes that the last 15,343 + 3 values and the
+   15 sparse values suffice, instead of all 1.6·10¹² values (3.2 TB as 16-bit values).
+3. Verify the period without storing the sequence: by Flammenkamp's criterion it suffices to
+   check \(G(i + p) = G(i)\) for \(t + \max(\text{last}, \text{depth}) = 15{,}346\) successive
+   values, i.e. compute to preperiod + period + 15,346 ≈ 7.9·10¹¹.  At about 10⁶ values per second
+   (an estimate, not measured) that is about 9 days on one machine.
 
 ## Benchmark
 
