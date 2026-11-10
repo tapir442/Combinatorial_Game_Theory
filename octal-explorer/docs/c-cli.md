@@ -18,13 +18,13 @@ rules `grundy` and `couples` (see [Concepts](concepts.md#game-codes)).
 | `-e M` | 200000 | number of values embedded in `index.html` |
 | `-p` | | print the sequence to stdout (30 per line) and write no files |
 | `-q` | | quiet: no summary on stdout, no progress |
-| `--sparse` | off | experimental rare/common-value method |
-| `--brute` | on | brute-force method (the default; kept for compatibility) |
-| `--blocked` | off | blocked multi-threaded method: same values as brute force, much faster for large N (see [Internals](c-internals.md#the-blocked-mode)) |
+| `--blocked` | **on** | blocked multi-threaded method on all cores (the default): same values as brute force, much faster for large N (see [Internals](c-internals.md#the-blocked-mode)) |
 | `-j THREADS` | all cores | number of threads for `--blocked` |
+| `--brute` | off | brute force on one core (the default before the blocked method existed) |
+| `--sparse` | off | experimental rare/common-value method (one core) |
 | `--gpu` | off | blocked method with the parallel part on a Vulkan GPU (see [Internals](c-internals.md#the-gpu-mode)); exits with an error if there is none |
 | `--rocm` | off | same as `--gpu`, on an AMD GPU with ROCm (HIP) instead of Vulkan |
-| `--check` | | compute with `--sparse` (or `--blocked`, if given) and with brute force, compare, and exit (status 1 on mismatch) |
+| `--check` | | compute with the chosen method (`--blocked` unless another is given) and with brute force, compare, and exit (status 1 on mismatch) |
 
 Progress is printed to stderr when stderr is a terminal.
 
@@ -52,7 +52,10 @@ server.
 ./octal .6 -n 100000 -w 512           # Officers, wrapped at 512
 ./octal grundy -n 50000
 ./octal .3303 -n 40 -p                # subtraction game {1,2,4}: 0 1 2 0 1 2 ...
-./octal .6 -n 20000 --check           # sparse vs brute
+./octal .007 -n 1000000 -j 8           # blocked method on 8 threads
+./octal .007 -n 100000 --brute         # one core
+./octal .6 -n 20000 --check            # blocked vs brute
+./octal .6 -n 20000 --sparse --check   # sparse vs brute
 ```
 
 ## Exit status

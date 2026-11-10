@@ -69,12 +69,13 @@ test-threads: tests/thread_test.c octal.c octal.h
 
 # Sanity checks: sparse and blocked vs brute force, known periods, thread safety
 test: octal test-threads
-	./octal .007 -n 20000 --check
+	./octal .007 -n 20000 --sparse --check
 	./octal .6 -n 5000 --sparse -q -o /tmp/octal-test-sp
-	./octal .6 -n 20000 --check
-	./octal grundy -n 8000 --check
-	./octal couples -n 8000 --check
-	./octal .f6 -n 3000 --check
+	./octal .6 -n 20000 --sparse --check
+	./octal grundy -n 8000 --sparse --check
+	./octal couples -n 8000 --sparse --check
+	./octal .f6 -n 3000 --sparse --check
+	./octal .007 -n 100000 --check
 	./octal .007 -n 100000 --blocked --check
 	./octal .6 -n 100000 --blocked -j 3 --check
 	./octal grundy -n 50000 --blocked --check

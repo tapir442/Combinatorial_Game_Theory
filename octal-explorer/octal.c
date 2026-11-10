@@ -1885,13 +1885,14 @@ static void usage(void) {
 "  -w W        wrap width for wrap.png (default: period, else best autocorrelation lag)\n"
 "  -L LAGS     maximum autocorrelation lag (default 1000)\n"
 "  -e M        values embedded in index.html (default 200000)\n"
-"  --sparse    use the sparse-space method (experimental; brute force is the default\n"
-"              and is usually as fast or faster)\n"
-"  --blocked   blocked multi-threaded method (same values as brute force)\n"
+"  --blocked   blocked multi-threaded method, all cores (the default; same values\n"
+"              as brute force)\n"
+"  --brute     brute force on one core\n"
+"  --sparse    sparse-space method (experimental, one core; usually not faster)\n"
 "  -j THREADS  threads for --blocked (default: all cores)\n"
 "  --gpu       blocked method with the parallel part on the GPU (Vulkan)\n"
 "  --rocm      same, on an AMD GPU with ROCm (HIP)\n"
-"  --check     compare --sparse (default), --blocked, --gpu or --rocm with brute force\n"
+"  --check     compare the chosen method (default --blocked) with brute force\n"
 "  -p          print the sequence to stdout and skip output files\n"
 "  -q          quiet\n");
     exit(2);
@@ -1907,7 +1908,7 @@ static void usage(void) {
  */
 int main(int argc, char **argv) {
     long N = 10000, embed = 200000;
-    int W = 0, L = 1000, sparse = 0, check = 0, print = 0, blocked = 0, threads = 0;
+    int W = 0, L = 1000, sparse = 0, check = 0, print = 0, blocked = 1, threads = 0;
     const char *dir = NULL;
     static struct option lo[] = {{"brute", no_argument, 0, 'b'}, {"sparse", no_argument, 0, 's'},
                                  {"check", no_argument, 0, 'c'}, {"blocked", no_argument, 0, 'B'},
@@ -1921,12 +1922,12 @@ int main(int argc, char **argv) {
         case 'w': W = atoi(optarg); break;
         case 'L': L = atoi(optarg); break;
         case 'e': embed = atol(optarg); break;
-        case 'b': sparse = 0; break;
-        case 's': sparse = 1; break;
+        case 'b': sparse = 0; blocked = 0; break;
+        case 's': sparse = 1; blocked = 0; break;
         case 'c': check = 1; break;
-        case 'B': blocked = 1; break;
-        case 'G': blocked = 2; break;
-        case 'R': blocked = 3; break;
+        case 'B': blocked = 1; sparse = 0; break;
+        case 'G': blocked = 2; sparse = 0; break;
+        case 'R': blocked = 3; sparse = 0; break;
         case 'j': threads = atoi(optarg); break;
         case 'p': print = 1; break;
         case 'q': quiet = 1; break;
@@ -1938,17 +1939,18 @@ int main(int argc, char **argv) {
     Rule R;
     if (parse_rule(argv[optind], &R)) die("cannot parse code (examples: .007  0.6  .137  4.  grundy)");
 
-    Result res = compute(&R, N, !blocked && (sparse || check), blocked, threads);
+    Result res = compute(&R, N, !blocked && sparse, blocked, threads);
 
     if (check) {
         Result b = compute(&R, N, 0, 0, 0);
-        const char *m = blocked == 3 ? "rocm" : blocked == 2 ? "gpu" : blocked ? "blocked" : "sparse";
+        const char *m = blocked == 3 ? "rocm" : blocked == 2 ? "gpu" : blocked ? "blocked"
+                      : sparse ? "sparse" : "brute";
         for (long n = 0; n < N; n++)
             if (b.G[n] != res.G[n]) {
                 printf("MISMATCH at n = %ld: %s %u, brute %u\n", n, m, res.G[n], b.G[n]);
                 return 1;
             }
-        if (blocked >= 2)
+        if (blocked >= 2 || (!blocked && !sparse))
             printf("check OK: %s, n < %ld, %s %.2f s, brute %.2f s\n", R.code, N, m, res.secs, b.secs);
         else if (blocked)
             printf("check OK: %s, n < %ld, blocked %.2f s (%d threads), brute %.2f s\n", R.code, N,

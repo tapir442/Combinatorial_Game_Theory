@@ -132,7 +132,7 @@ n = 2048, 8192, …).  The mode falls back to brute force if more than 25% are r
 **Limitation.** For `.6` and `.007` the nim-value itself is usually *common*.  Proving
 that a common value is unreachable still needs the full scan, so this mode is not
 faster there.  A real speed-up needs Grossman's approach (GONC 5); this is task 1.12 in
-`proposals/tasks/`.  `--check` verifies the mode against brute force.
+`proposals/tasks/`.  `--sparse --check` verifies the mode against brute force.
 
 ## Period search
 
