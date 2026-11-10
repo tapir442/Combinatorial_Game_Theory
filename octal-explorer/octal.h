@@ -26,6 +26,10 @@
  *   octal_extend() call allocates its own scratch memory and frees it before
  *   returning.  Calls may run concurrently in different threads, as long as
  *   they do not write to the same array G.
+ * - **No internal cache.**  The array G is the only memo: values are computed
+ *   bottom-up from the stored values of smaller heaps, each exactly once.  To
+ *   avoid recomputation, keep G and pass it back to octal_extend() with
+ *   from = number of values already known (the Python NimSequence does this).
  * - The library never exits the process; errors are reported as return codes.
  * - Return codes: 0 = success, -1 = the code does not parse, -2 = a value
  *   exceeds 65535, -3 = out of memory.

@@ -118,6 +118,15 @@ class NimSequence:
     >>> s = NimSequence(".77", 200)       # Kayles
     >>> s.period
     Period(preperiod=71, period=12, proven=True, saltus=0, proof='periodicity theorem')
+
+    Caching
+    -------
+    - The computed values are kept in the instance; :meth:`extend` computes
+      only the new heap sizes and passes the known prefix to the C code, which
+      builds G(n) bottom-up from the stored values of smaller heaps.
+    - :attr:`period` is cached and reset whenever :meth:`extend` adds values.
+    - Nothing is shared between instances or saved to disk: two
+      ``NimSequence(".007", n)`` objects each compute from scratch.
     """
 
     def __init__(self, code: str, n: int = 0, *, progress: bool = True, chunk_seconds: float = 0.3):

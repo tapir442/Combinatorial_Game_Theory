@@ -31,6 +31,13 @@
  * is rare.  Proving that a *common* value is unreachable still needs a full
  * scan, so on .6 and .007 it is not faster.  `--check` compares both methods.
  *
+ * Caching: there is no memo/hash table of positions.  Values are computed
+ * bottom-up (dynamic programming) into one array G; G(n) is read off the
+ * stored G(a), G(b) of smaller heaps, so every G(k) is computed once and
+ * reused for all larger n.  The mex uses a stamp table (see Scratch) that is
+ * never cleared between heap sizes.  Nothing is kept between library calls:
+ * octal_extend() continues from the G[0..from) passed in by the caller.
+ *
  * Build with -DOCTAL_NO_MAIN -shared -fPIC for the library used by the Python
  * package (functions octal_rule_name, octal_extend, octal_period; see octal.h).
  *
