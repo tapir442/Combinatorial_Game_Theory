@@ -99,11 +99,13 @@ the Python package do this when `hipcc` is installed.  Returns −4 otherwise.
 ### `octal_extend_rare`
 
 ```c
-int octal_extend_rare(const char *code, uint16_t *G, long from, long to);
+int octal_extend_rare(const char *code, uint16_t *G, long from, long to, int threads);
 ```
 
-Same contract and values as `octal_extend`, with the rare-value algorithm (Grossman 2017) on
-one core.  Fast for games with few rare values; for other games it falls back to brute force.
+Same contract and values as `octal_extend`, with the rare-value algorithm (Grossman 2017).
+`threads == 1` runs the plain algorithm on one core; otherwise it speculates on one core and
+checks in parallel on `threads` threads (≤ 0: all cores).  Fast for games with few rare values;
+for other games it falls back to brute force.
 See [Rare-value algorithm](rare-values.md).
 
 ### `octal_period`

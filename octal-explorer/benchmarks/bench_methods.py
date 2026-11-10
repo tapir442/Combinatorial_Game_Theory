@@ -2,6 +2,7 @@
 """Benchmark the computation methods of ./octal: brute, blocked, rare (and optionally gpu, rocm).
 
 Each run is `./octal CODE -n N -p --METHOD` (wall-clock time, values printed to stdout).
+`rare` uses speculation on all cores, `rare-1` the plain rare-value algorithm (-j 1).
 All methods that ran for the same (code, n) must print identical values, and the
 rare-value runs at the largest n are checked against the blocked run on their common prefix.
 
@@ -31,12 +32,15 @@ OCTAL = HERE.parent / "octal"
 # Treblecross (.007) does not (about 10% of heap sizes are rare for the best mask)
 GAMES = [".6", "grundy", "couples", ".007"]
 # (n, methods); brute force and blocked are O(n^2), so they stop earlier
-FULL = [(100_000, ["brute", "blocked", "rare"]),
-        (300_000, ["brute", "blocked", "rare"]),
-        (1_000_000, ["blocked", "rare"]),
-        (10_000_000, ["rare"])]
-QUICK = [(50_000, ["brute", "blocked", "rare"]),
-         (200_000, ["blocked", "rare"])]
+FULL = [(100_000, ["brute", "blocked", "rare-1", "rare"]),
+        (300_000, ["brute", "blocked", "rare-1", "rare"]),
+        (1_000_000, ["blocked", "rare-1", "rare"]),
+        (10_000_000, ["rare-1", "rare"])]
+QUICK = [(50_000, ["brute", "blocked", "rare-1", "rare"]),
+         (200_000, ["blocked", "rare-1", "rare"])]
+# command-line options of each benchmarked method
+ARGS = {"brute": ["--brute"], "blocked": ["--blocked"], "gpu": ["--gpu"], "rocm": ["--rocm"],
+        "rare": ["--rare"], "rare-1": ["--rare", "-j", "1"]}
 # the rare-value method is only fast for these games; elsewhere it falls back to brute
 # force, so it is skipped beyond 3*10^5 there
 SPARSE = {".6", "grundy", "couples"}
@@ -45,7 +49,7 @@ SPARSE = {".6", "grundy", "couples"}
 def run(code: str, n: int, method: str):
     """(seconds, values) of one ./octal run."""
     t = time.perf_counter()
-    r = subprocess.run([str(OCTAL), code, "-n", str(n), "-p", "-q", f"--{method}"],
+    r = subprocess.run([str(OCTAL), code, "-n", str(n), "-p", "-q", *ARGS[method]],
                        capture_output=True, text=True)
     dt = time.perf_counter() - t
     if r.returncode != 0:
@@ -79,7 +83,7 @@ def main() -> int:
             if code not in SPARSE and n > 1_000_000:
                 continue
             if code not in SPARSE and n > 300_000:   # rare falls back to brute force there
-                methods = [m for m in methods if m != "rare"]
+                methods = [m for m in methods if not m.startswith("rare")]
             values = {}
             for m in methods:
                 dt, v = run(code, n, m)
@@ -110,18 +114,20 @@ def main() -> int:
 
 
 def write_markdown(rows, path: Path) -> None:
-    methods = [m for m in ("brute", "blocked", "gpu", "rocm", "rare") if any(r["method"] == m for r in rows)]
+    methods = [m for m in ("brute", "blocked", "gpu", "rocm", "rare-1", "rare")
+               if any(r["method"] == m for r in rows)]
     table = {(r["code"], r["n"], r["method"]): r["seconds"] for r in rows}
     keys = sorted({(r["code"], r["n"]) for r in rows}, key=lambda k: (GAMES.index(k[0]), k[1]))
     cpu = os.cpu_count()
     lines = [f"# Methods benchmark", "",
              f"Wall-clock seconds of `./octal CODE -n N -p --METHOD` ({cpu} logical CPUs).  "
-             "All methods gave identical values.  `rare` and `brute` use one core, `blocked` all cores.", "",
+             "All methods gave identical values.  `brute` and `rare-1` use one core; `blocked` and "
+             "`rare` (speculation + parallel check) use all cores.", "",
              "| code | n | " + " | ".join(methods) + " | rare vs best other |",
              "|---|---:|" + "---:|" * len(methods) + "---:|"]
     for code, n in keys:
         cells = [f"{table[(code, n, m)]:.2f}" if (code, n, m) in table else "–" for m in methods]
-        others = [table[(code, n, m)] for m in methods if m != "rare" and (code, n, m) in table]
+        others = [table[(code, n, m)] for m in methods if not m.startswith("rare") and (code, n, m) in table]
         ratio = (f"{min(others) / table[(code, n, 'rare')]:.1f}×"
                  if others and (code, n, "rare") in table else "–")
         lines.append(f"| `{code}` | {n:,} | " + " | ".join(cells) + f" | {ratio} |")

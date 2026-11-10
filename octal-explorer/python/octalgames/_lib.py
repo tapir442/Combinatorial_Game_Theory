@@ -101,7 +101,7 @@ def _load():
     lib.octal_gpu_name.restype = ctypes.c_int
     lib.octal_extend_rocm.argtypes = [ctypes.c_char_p, u16, ctypes.c_long, ctypes.c_long]
     lib.octal_extend_rocm.restype = ctypes.c_int
-    lib.octal_extend_rare.argtypes = [ctypes.c_char_p, u16, ctypes.c_long, ctypes.c_long]
+    lib.octal_extend_rare.argtypes = [ctypes.c_char_p, u16, ctypes.c_long, ctypes.c_long, ctypes.c_int]
     lib.octal_extend_rare.restype = ctypes.c_int
     lib.octal_rocm_name.argtypes = [ctypes.c_char_p, ctypes.c_int]
     lib.octal_rocm_name.restype = ctypes.c_int
@@ -128,7 +128,7 @@ class Method(str, enum.Enum):
     BLOCKED = "blocked"  #: octal_extend_blocked(): blocked method, all cores (the default)
     GPU = "gpu"          #: octal_extend_gpu(): blocked method on a Vulkan GPU
     ROCM = "rocm"        #: octal_extend_rocm(): blocked method on an AMD GPU with ROCm (HIP)
-    RARE = "rare"        #: octal_extend_rare(): rare-value algorithm (Grossman 2017), one core
+    RARE = "rare"        #: octal_extend_rare(): rare-value algorithm (Grossman 2017), speculation on threads
 
     def __str__(self) -> str:
         return self.value
@@ -172,16 +172,18 @@ def extend(code: str, values: np.ndarray, start: int, stop: int, method: Method 
     """Fill values[start:stop] in place (values[:start] must be valid).
 
     Uses the C function of `method` (see Method); `threads` is the thread count
-    for Method.BLOCKED (0 = all cores).  Thread-safe; releases the GIL while the
+    for Method.BLOCKED and Method.RARE (0 = all cores; 1 = no speculation for RARE).  Thread-safe; releases the GIL while the
     C code runs.
     """
     method = Method.parse(method)
     lib, c = load(), code.encode()
     if method is Method.BLOCKED:
         rc = lib.octal_extend_blocked(c, values, start, stop, int(threads))
+    elif method is Method.RARE:
+        rc = lib.octal_extend_rare(c, values, start, stop, int(threads))
     else:
         fn = {Method.BRUTE: lib.octal_extend, Method.GPU: lib.octal_extend_gpu,
-              Method.ROCM: lib.octal_extend_rocm, Method.RARE: lib.octal_extend_rare}[method]
+              Method.ROCM: lib.octal_extend_rocm}[method]
         rc = fn(c, values, start, stop)
     if rc == -1:
         raise ValueError(f"cannot parse game code {code!r}")

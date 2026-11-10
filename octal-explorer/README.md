@@ -65,7 +65,7 @@ Methods (all give identical values; choose one, the default is `--blocked`):
 | option | method | best for |
 |---|---|---|
 | `--blocked` (default) | blocked pair scan on all cores (`-j N` threads) | any game |
-| `--rare` | rare-value algorithm (Grossman 2017), one core, nearly constant time per value | games with few rare values: `.6`, `grundy`, `couples` |
+| `--rare` | rare-value algorithm (Grossman 2017), nearly constant time per value; speculation on all cores (`-j 1`: plain, one core) | games with few rare values: `.6`, `grundy`, `couples` |
 | `--gpu` / `--rocm` | blocked method on a Vulkan / ROCm GPU | machines with a strong GPU |
 | `--brute` | brute force, one core | reference |
 | `--sparse` | older experimental rare/common variant, one core | testing only |
@@ -97,7 +97,8 @@ values of `.007` take 5.6 s against 73 s.  See `docs/benchmark.md` and
 
 - Brute force and the blocked method are O(n) per heap size (O(N²) total).  10⁶ values
   take about 143 s with `--brute` and 10 s with `--blocked` on 24 threads.  `--rare` takes
-  6 s for 10⁶ and 58 s for 10⁷ values of `.6`, but gives no speed-up for `.007`.
+  1.8 s for 10⁶ and 17 s for 10⁷ values of `.6` (6 s and 61 s with `-j 1`), but gives no
+  speed-up for `.007`.
 - `--sparse` (CLI only) is an older rare/common-value variant with the opposite convention.
   It is checked against brute force but is not faster; `--rare` replaces it.
 - The C library is thread-safe (no global state).  Python threads compute different games

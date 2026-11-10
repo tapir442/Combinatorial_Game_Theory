@@ -148,8 +148,9 @@ s = og.compute(".007", 1_000_000, method="gpu")
 
 The methods are the members of `og.Method`: `BRUTE`, `BLOCKED` (the default), `GPU`, `ROCM` and
 `RARE`.  Their string values (`"brute"`, `"blocked"`, `"gpu"`, `"rocm"`, `"rare"`) are accepted
-everywhere too.  `RARE` is the [rare-value algorithm](rare-values.md): one core, but much faster
-than the others for games with few rare values, such as `.6`, `grundy` and `couples`.
+everywhere too.  `RARE` is the [rare-value algorithm](rare-values.md), much faster than the
+others for games with few rare values, such as `.6`, `grundy` and `couples`.  It uses
+speculation on all cores; `threads=1` gives the plain one-core algorithm.
 
 ```python
 og.set_default_method(og.Method.GPU)      # all later compute() / NimSequence() / survey() calls

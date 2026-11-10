@@ -19,12 +19,12 @@ rules `grundy` and `couples` (see [Concepts](concepts.md#game-codes)).
 | `-p` | | print the sequence to stdout (30 per line) and write no files |
 | `-q` | | quiet: no summary on stdout, no progress |
 | `--blocked` | **on** | blocked multi-threaded method on all cores (the default): same values as brute force, much faster for large N (see [Internals](c-internals.md#the-blocked-mode)) |
-| `-j THREADS` | all cores | number of threads for `--blocked` |
+| `-j THREADS` | all cores | number of threads for `--blocked` and `--rare` |
 | `--brute` | off | brute force on one core (the default before the blocked method existed) |
 | `--sparse` | off | experimental rare/common-value method (one core) |
 | `--gpu` | off | blocked method with the parallel part on a Vulkan GPU (see [Internals](c-internals.md#the-gpu-mode)); exits with an error if there is none |
 | `--rocm` | off | same as `--gpu`, on an AMD GPU with ROCm (HIP) instead of Vulkan |
-| `--rare` | off | rare-value algorithm (Grossman 2017), one core; much faster for games with few rare values such as `.6`, `grundy`, `couples` (see [Rare-value algorithm](rare-values.md)) |
+| `--rare` | off | rare-value algorithm (Grossman 2017); much faster for games with few rare values such as `.6`, `grundy`, `couples`.  Speculates on one core and checks on `-j` threads; `-j 1` is the plain algorithm (see [Rare-value algorithm](rare-values.md)) |
 | `--check` | | compute with the chosen method (`--blocked` unless another is given) and with brute force, compare, and exit (status 1 on mismatch) |
 
 Progress is printed to stderr when stderr is a terminal.

@@ -60,9 +60,32 @@ values **are** reachable, which can stop early.
 - uses brute force until a mask makes at most 5% of the heap sizes rare.  The mask is chosen
   (`rv_choose_mask`: the one with the fewest rare heap sizes, trying all masks below the value
   capacity) at \(n\) = 2048, 8192, 32768, …, and when a computation starts past 2048;
-- then runs `grundy_rare` (steps 1 and 2 above), appending each new rare heap size;
+- then, with `-j 1`, runs `grundy_rare` (steps 1 and 2 above) for every heap size, appending
+  each new rare heap size;
+- otherwise (the default: all cores) uses **speculation**, see below;
 - reports in `summary.txt` the mask, the number of rare heap sizes, the pairs examined in each
-  step and how often step 2 had to scan everything.
+  step, how often step 2 had to scan everything, and the speculation statistics.
+
+## Speculation (Grossman §3.1)
+
+Step 2 is about 60% of the work, and it almost never changes the result.  So `rare_spec_chunk`
+works on chunks of \(n/8\) heap sizes (between 4096 and 2¹⁸, ending at the next mask checkpoint):
+
+1. **Speculate** on one core: compute every value of the chunk with step 1 only, that is,
+   assume that no new rare value appears.  Speculative values are always common.
+2. **Check** in parallel: recompute every value of the chunk with the full algorithm, taking
+   the speculative values before it as given.  Given those values, the heap sizes are
+   independent, so the check runs on all threads (OpenMP), each with its own mark table.
+3. If every value agrees, all are correct, by induction over \(n\).  Otherwise let \(f\) be
+   the first heap size that disagrees.  The values before \(f\) are correct, so the value the
+   check computed for \(f\) is correct too: it is a new rare value.  It is stored and added to
+   the rare list, and speculation resumes at \(f + 1\); the speculative values after \(f\)
+   are thrown away.
+
+So speculation is **exact** as well.  Grossman checked the intervals on a cluster; here the
+cores of one machine do it.  It starts at \(n = 4096\) once a mask is active; `-j 1` turns it
+off.  For `grundy` up to 150,000 the check fails 12 times (12 new rare values), and the result
+still equals brute force.
 
 For Officers it finds exactly Grossman's mask `0x1ee` and his 1584 rare values (1583 heap
 sizes ≥ 1, plus \(G(0)\)).  `--rare --check` and the tests compare it with brute force.
@@ -91,44 +114,46 @@ to 2²⁵ must rely on something else.
 through the command-line program and checks that all give identical values.
 
 Wall-clock seconds on a Ryzen 9 7900X (12 cores, 24 threads; GPU = its integrated Radeon).
-`brute` and `rare` use one core, `blocked` uses all 24 threads.
+`brute` and `rare -j 1` use one core; `blocked` and `rare` (speculation + parallel check) use
+all 24 threads.
 
-| code | n | brute | blocked | gpu (Vulkan) | rocm | **rare** |
-|---|---:|---:|---:|---:|---:|---:|
-| `.6` | 10⁵ | 1.52 | 0.12 | 0.42 | 0.54 | 0.60 |
-| `.6` | 3·10⁵ | 13.1 | 1.13 | 2.04 | 2.53 | 1.74 |
-| `.6` | 10⁶ | – | 9.76 | 22.8 | 19.4 | **6.10** |
-| `.6` | 10⁷ | – | – | – | – | **57.9** |
-| `grundy` | 10⁶ | – | 8.95 | 22.4 | 19.2 | **5.13** |
-| `grundy` | 10⁷ | – | – | – | – | **53.5** |
-| `couples` | 10⁶ | – | 9.95 | 23.4 | 27.7 | **6.15** |
-| `couples` | 10⁷ | – | – | – | – | **58.1** |
-| `.007` | 3·10⁵ | 13.4 | 1.13 | 2.02 | 2.25 | 13.6 (falls back to brute) |
-| `.007` | 10⁶ | – | 9.71 | 23.4 | 20.9 | – |
+| code | n | brute | blocked | gpu (Vulkan) | rocm | rare -j 1 | **rare** |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `.6` | 10⁵ | 1.55 | 0.12 | 0.23 | 0.43 | 0.60 | 0.35 |
+| `.6` | 3·10⁵ | 13.1 | 0.90 | 2.00 | 2.14 | 1.80 | **0.59** |
+| `.6` | 10⁶ | – | 9.53 | 22.7 | 19.9 | 6.43 | **1.80** |
+| `.6` | 10⁷ | – | – | – | – | 60.9 | **15.2** |
+| `grundy` | 10⁶ | – | 8.91 | 22.4 | 20.4 | 5.38 | **1.41** |
+| `grundy` | 10⁷ | – | – | – | – | 54.0 | **13.3** |
+| `couples` | 10⁶ | – | 9.57 | 22.7 | 20.8 | 5.57 | **1.64** |
+| `couples` | 10⁷ | – | – | – | – | 56.1 | **14.1** |
+| `.007` | 3·10⁵ | 12.8 | 1.12 | 2.14 | 2.27 | 13.0 | 12.9 (falls back to brute) |
+| `.007` | 10⁶ | – | 9.88 | 23.2 | 19.8 | – | – |
 
 The full table, with all sizes, is in `benchmarks/results/methods.md`.
 
-- For the three sparse games the rare-value algorithm runs at an almost constant
+- For the three sparse games the plain rare-value algorithm runs at an almost constant
   **≈ 170,000 values per second** on one core (10⁶ → 10⁷ takes 10× as long, not 100×).  Grossman
   reports 88,000 values/s for the same algorithm on a 2008 Xeon.
-- At \(n = 10^6\) one core of `rare` beats all 24 threads of `blocked` by 1.6×, and brute force on
-  one core by about 23× (brute force for `.6` to 10⁶ takes 143 s).  At \(10^7\) the O(n²)
-  methods would need roughly 100× their 10⁶ time (about 1000 s for `blocked`), so `rare` is
-  then about 17× faster; and the gap keeps growing with \(n\).
-- Below about 3·10⁵, `blocked` is faster: `rare` uses brute force until its mask is chosen at
-  n = 32768, and one core is slower than 24 for that part.
-- For `.6` up to 10⁶ (`summary.txt`): mask `0x1ee`, 1583 rare heap sizes, on average about
-  1580 pairs in step 1 and 2750 in step 2 per heap size, and step 2 never had to scan
-  everything.  Step 2 is 63% of the work, which is what Grossman's speculation removes.
+- **Speculation** makes it 3.6–4.1× faster again: **≈ 660,000–750,000 values per second**.
+  Grossman's speculation gave 2.2× (196,000 values/s); here the check also runs on all cores.
+- At \(n = 10^6\), `rare` is 5–6× faster than `blocked` on all 24 threads, and about 80× faster
+  than brute force (143 s for `.6`).  At \(10^7\) the O(n²) methods would need roughly 100× their
+  10⁶ time (about 1000 s for `blocked`), so `rare` is then about 60× faster than `blocked`, and
+  the gap keeps growing with \(n\).
+- Below about 2·10⁵, `blocked` is faster: `rare` uses brute force on one core until its mask is
+  chosen at n = 32768.
+- For `.6` up to 10⁶ (`summary.txt`, `-j 1`): mask `0x1ee`, 1583 rare heap sizes, on average
+  about 1580 pairs in step 1 and 2750 in step 2 per heap size, and step 2 never had to scan
+  everything.
 - Treblecross gains nothing: no mask makes few heap sizes rare.
 
 ## Not implemented yet (Grossman §3)
 
-Grossman's speed-ups beyond the basic algorithm, about 60× in total:
+Grossman's further speed-ups, about 60× in total together with speculation:
 
-- **Speculation.**  Run only step 1, assuming no new rare values, and verify intervals of the
-  result in parallel (on a cluster) with the full algorithm; induction over the intervals
-  makes the whole sequence correct.
+- **Overlapping speculation and check.**  Here the next chunk is speculated only after the
+  check of the current one; running both at the same time would hide most of the check.
 - **One byte per value.**  All Officers values are below 512, and for a common value bit 8
   follows from the others, so values fit in a byte and the mark array has 256 entries.
 - **Generated, fully unrolled code** for step 1 and for the mex search: the rare heap sizes

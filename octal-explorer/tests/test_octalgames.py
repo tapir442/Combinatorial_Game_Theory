@@ -259,3 +259,15 @@ def test_rare_equals_brute(code):
     c = og.compute(code, n, progress=False, method=og.Method.RARE, chunk_seconds=0.001)
     assert np.array_equal(a.values, b.values)
     assert np.array_equal(a.values, c.values)
+
+
+@pytest.mark.parametrize("code", [".6", "grundy", "couples"])
+def test_rare_speculation_equals_plain(code):
+    """Speculation (default threads) and the plain algorithm (threads=1) agree; grundy
+    exercises failed checks (new rare values found during speculation)."""
+    n = 120000
+    plain = og.compute(code, n, progress=False, method="rare", threads=1)
+    spec = og.compute(code, n, progress=False, method="rare")
+    few = og.compute(code, n, progress=False, method="rare", threads=3, chunk_seconds=0.01)
+    assert np.array_equal(plain.values, spec.values)
+    assert np.array_equal(plain.values, few.values)

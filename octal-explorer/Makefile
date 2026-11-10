@@ -86,6 +86,8 @@ test: octal test-threads
 	./octal grundy -n 60000 --rare --check
 	./octal couples -n 60000 --rare --check
 	./octal .007 -n 20000 --rare --check
+	./octal .6 -n 100000 --rare -j 1 --check
+	./octal grundy -n 150000 --rare -j 3 --check
 	./octal .77 -n 500 -q -o /tmp/octal-test-kayles && grep -q "period          12, preperiod 71 (PROVED" /tmp/octal-test-kayles/summary.txt && echo "Kayles period 12 OK"
 	./octal .07 -n 500 -q -o /tmp/octal-test-dawson && grep -q "period          34, preperiod 53 (PROVED" /tmp/octal-test-dawson/summary.txt && echo "Dawson's Kayles period 34 OK"
 

@@ -103,14 +103,26 @@ int octal_extend_blocked(const char *code, uint16_t *G, long from, long to, int 
  * usually have a witness pair among the first few thousand pairs.  So the
  * cost per heap size is nearly constant instead of O(n) when the game has few
  * rare values (.6, .007, ...).  Exact for every game: it falls back to brute
- * force while no good mask exists.  One core; reentrant like octal_extend().
+ * force while no good mask exists.  Reentrant like octal_extend().
+ *
+ * With @p threads == 1 it runs the plain algorithm on one core.  Otherwise it
+ * uses Grossman's speculation (section 3.1): it computes chunks with step 1
+ * only, assuming no new rare values, and then checks every value of the chunk
+ * with the full algorithm in parallel; if a value is wrong, the values before it
+ * are still correct, the wrong one is replaced, and speculation resumes after it.
  *
  * J.P. Grossman, "Searching for periodicity in Officers", Games of No Chance 5,
  * MSRI Publications 70 (2017), 373-385.
  *
+ * @param code     game code
+ * @param G        array of at least @p to entries; G[0..from) must be valid
+ * @param from     first heap size to compute
+ * @param to       one past the last heap size to compute
+ * @param threads  1: plain algorithm; > 1: speculation with that many threads;
+ *                 <= 0: all cores
  * @return 0, -1 (bad code), -2 (value > 65535) or -3 (out of memory)
  */
-int octal_extend_rare(const char *code, uint16_t *G, long from, long to);
+int octal_extend_rare(const char *code, uint16_t *G, long from, long to, int threads);
 
 /**
  * @brief Like octal_extend_blocked(), but with the parallel scan on the GPU.
