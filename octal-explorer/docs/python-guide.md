@@ -111,16 +111,19 @@ from concurrent.futures import ThreadPoolExecutor
 
 codes = [".6", ".007", ".07", ".137", ".77", "grundy", ".164", ".4"]
 with ThreadPoolExecutor(8) as ex:
-    seqs = list(ex.map(lambda c: og.compute(c, 60_000, progress=False), codes))
+    seqs = list(ex.map(lambda c: og.compute(c, 60_000, progress=False, method="brute"), codes))
 ```
 
 On a 12-core machine this is about 4× faster than computing them one after another.
-The slowest game (Kayles) limits it.  By default a single sequence is computed by one
-core.  Don't call `extend` on the *same* `NimSequence` from two threads at once.
+The slowest game (Kayles) limits it.  Pass `method="brute"` here (or call
+`og.set_default_method("brute")`): the default `"blocked"` already uses all cores for each game,
+so running many games in parallel threads on top of it only oversubscribes the CPU.  Don't call
+`extend` on the *same* `NimSequence` from two threads at once.
 
 ## Using all cores for one sequence
 
-`method="blocked"` computes one sequence on several cores (it gives exactly the same values):
+`method="blocked"`, the default, computes one sequence on several cores.  It gives exactly the
+same values as `method="brute"` (one core):
 
 ```python
 s = og.compute(".007", 1_000_000, method="blocked")             # all cores
@@ -139,5 +142,23 @@ og.gpu_name()                          # 'AMD Radeon ...', or None without a usa
 s = og.compute(".007", 1_000_000, method="gpu")
 ```
 
-It raises `RuntimeError` if there is no GPU.  Whether it beats `"blocked"` depends on the GPU:
-an integrated GPU with 2 compute units is slower than 12 CPU cores (24 s vs 10 s above).
+`method="rocm"` does the same on an AMD GPU with ROCm (HIP), and `og.rocm_name()` names it.
+
+## Changing the default method
+
+```python
+og.set_default_method("gpu")              # all later compute() / NimSequence() / survey() calls
+og.set_default_method("blocked", threads=4)
+og.get_default_method()                   # 'blocked'
+```
+
+Or set it before Python starts, for example for a whole JupyterLab session:
+
+```sh
+OCTALGAMES_METHOD=gpu make lab            # OCTALGAMES_THREADS=4 for the blocked thread count
+```
+
+A method passed explicitly (`og.compute(code, n, method="brute")`) always wins.  Sequences that
+already exist keep their method for later `extend` calls.
+Both raise `RuntimeError` if there is no such GPU.  Whether they beat `"blocked"` depends on the
+GPU: an integrated GPU with 2 compute units is slower than 12 CPU cores (21–24 s vs 10 s above).

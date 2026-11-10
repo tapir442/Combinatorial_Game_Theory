@@ -91,6 +91,31 @@ a Ryzen 9 7900X (2 compute units): 23.6 s.  That is 3.3× one CPU core (79 s) bu
 `--blocked` on all 24 threads (9.8 s).  A discrete GPU has 20–100× more compute units.
 `--gpu --check`, `make test-gpu` and the GPU tests in pytest compare it with brute force.
 
+### Backends
+
+Both GPU modes share one driver, `extend_device`, which takes a `Device`: a small set of
+functions to start a computation, scan one block, upload finished values and clean up.
+
+| | `--gpu` (Vulkan) | `--rocm` (HIP) |
+|---|---|---|
+| kernel | `octal_gpu.comp` (GLSL → SPIR-V, embedded) | `octal_rocm.hip` (`hipcc`, linked as `octal_rocm.o`) |
+| GPUs | any Vulkan GPU | AMD GPUs supported by ROCm |
+| memory | host-visible buffers, no copies | device memory, explicit `hipMemcpy` (better on discrete GPUs) |
+| build switch | `-DOCTAL_VULKAN -lvulkan` | `-DOCTAL_ROCM octal_rocm.o -lamdhip64 -lstdc++` |
+
+The ROCm kernel is compiled with `-mwavefrontsize64`.  On RDNA GPUs HIP defaults to wave32,
+which is 1.8× slower for this kernel.  Copies to and from the device take under 0.1% of the time.
+
+Measured on `.007`, \(N = 10^6\), Ryzen 9 7900X iGPU (`gfx1036`, 2 compute units; not officially
+supported by ROCm, but it works with Ubuntu's ROCm 7.1):
+
+| method | time |
+|---|---|
+| `--blocked`, 24 CPU threads | 9.8 s |
+| `--rocm` | 20.8 s |
+| `--gpu` (Vulkan) | 23.3 s |
+| `--blocked -j 1` | 79 s |
+
 ## The sparse mode
 
 `grundy_sparse` implements a rare/common split.  Value \(v\) is *rare* if

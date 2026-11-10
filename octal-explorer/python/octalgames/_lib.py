@@ -7,7 +7,9 @@ Set OCTALGAMES_LIB to use a library somewhere else.
 from __future__ import annotations
 
 import ctypes
+import itertools
 import os
+import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -26,16 +28,37 @@ class BackendError(RuntimeError):
     pass
 
 
+def _build_rocm(src: Path, out: Path):
+    """Compile octal_rocm.hip with hipcc (for method="rocm"); return the link flags, or []."""
+    hip = src.with_name("octal_rocm.hip")
+    hipcc = os.environ.get("HIPCC", "hipcc")
+    if not hip.exists() or not shutil.which(hipcc):
+        return []
+    obj = out.with_name("octal_rocm.o")
+    arch = os.environ.get("ROCM_ARCH", "native")
+    # wave64: 1.8x faster than RDNA's default wave32 for this kernel
+    r = subprocess.run([hipcc, "-O3", "-mwavefrontsize64", "-fPIC", f"--offload-arch={arch}", "-c", str(hip),
+                        "-o", str(obj)],
+                       capture_output=True, text=True)
+    return [str(obj), "-DOCTAL_ROCM", "-lamdhip64", "-lstdc++"] if r.returncode == 0 else []
+
+
 def _build(src: Path, out: Path) -> None:
-    """Compile with OpenMP (method="blocked") and Vulkan (method="gpu", if the generated
-    octal_gpu_spv.h exists); drop what the system does not support."""
+    """Compile with OpenMP (method="blocked"), Vulkan (method="gpu", if the generated
+    octal_gpu_spv.h exists) and ROCm (method="rocm", if hipcc works); drop what the
+    system does not support."""
     cc = os.environ.get("CC", "cc")
     base = [cc, "-O3", "-march=native", "-std=c11", "-Wno-unused-function", "-shared", "-fPIC",
             "-DOCTAL_NO_MAIN", "-o", str(out), str(src), "-lz", "-lm"]
-    omp, vk = ["-fopenmp"], ["-DOCTAL_VULKAN", "-lvulkan"]
-    variants = [base[:1] + omp + base[1:], base]
-    if src.with_name("octal_gpu_spv.h").exists():
-        variants = [v + vk for v in variants] + variants
+    omp = ["-fopenmp"]
+    vk = ["-DOCTAL_VULKAN", "-lvulkan"] if src.with_name("octal_gpu_spv.h").exists() else []
+    rocm = _build_rocm(src, out)
+    # every combination of the optional features, most features first
+    variants = []
+    for use_rocm, use_vk, use_omp in itertools.product((1, 0), repeat=3):
+        if (use_rocm and not rocm) or (use_vk and not vk):
+            continue
+        variants.append(base + (omp if use_omp else []) + (vk if use_vk else []) + (rocm if use_rocm else []))
     for cmd in variants:
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode == 0:
@@ -57,7 +80,7 @@ def _load():
     path = Path(os.environ.get("OCTALGAMES_LIB", _HERE / "liboctal.so"))
     src = next((s for s in _SOURCES if s.exists()), None)
     if "OCTALGAMES_LIB" not in os.environ and src is not None:
-        deps = [src.with_name("octal.h"), src.with_name("octal_gpu_spv.h")]
+        deps = [src.with_name(f) for f in ("octal.h", "octal_gpu_spv.h", "octal_rocm.hip")]
         newest = max([src.stat().st_mtime] + [d.stat().st_mtime for d in deps if d.exists()])
         if not path.exists() or newest > path.stat().st_mtime:
             _build(src, path)
@@ -75,6 +98,10 @@ def _load():
     lib.octal_extend_gpu.restype = ctypes.c_int
     lib.octal_gpu_name.argtypes = [ctypes.c_char_p, ctypes.c_int]
     lib.octal_gpu_name.restype = ctypes.c_int
+    lib.octal_extend_rocm.argtypes = [ctypes.c_char_p, u16, ctypes.c_long, ctypes.c_long]
+    lib.octal_extend_rocm.restype = ctypes.c_int
+    lib.octal_rocm_name.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    lib.octal_rocm_name.restype = ctypes.c_int
     lib.octal_period.argtypes = [ctypes.c_char_p, u16, ctypes.c_long, ctypes.POINTER(ctypes.c_long)]
     lib.octal_period.restype = ctypes.c_int
     lib.octal_period_ex.argtypes = [ctypes.c_char_p, u16, ctypes.c_long, ctypes.POINTER(ctypes.c_long)]
@@ -89,7 +116,7 @@ def rule_name(code: str) -> str:
     return buf.value.decode()
 
 
-METHODS = ("brute", "blocked", "gpu")
+METHODS = ("brute", "blocked", "gpu", "rocm")
 
 
 def gpu_name():
@@ -100,13 +127,22 @@ def gpu_name():
     return buf.value.decode()
 
 
+def rocm_name():
+    """Name of the GPU used by method="rocm", or None if there is none (or no ROCm support)."""
+    buf = ctypes.create_string_buffer(256)
+    if load().octal_rocm_name(buf, 256) != 0:
+        return None
+    return buf.value.decode()
+
+
 def extend(code: str, values: np.ndarray, start: int, stop: int, method: str = "brute",
            threads: int = 0) -> None:
     """Fill values[start:stop] in place (values[:start] must be valid).
 
     method="brute" uses octal_extend() (one core); method="blocked" uses
     octal_extend_blocked() with `threads` threads (0 = all cores); method="gpu"
-    uses octal_extend_gpu() (Vulkan).  All give the same values.  Thread-safe;
+    uses octal_extend_gpu() (Vulkan), method="rocm" octal_extend_rocm() (HIP).
+    All give the same values.  Thread-safe;
     releases the GIL while the C code runs.
     """
     if method == "brute":
@@ -115,6 +151,8 @@ def extend(code: str, values: np.ndarray, start: int, stop: int, method: str = "
         rc = load().octal_extend_blocked(code.encode(), values, start, stop, int(threads))
     elif method == "gpu":
         rc = load().octal_extend_gpu(code.encode(), values, start, stop)
+    elif method == "rocm":
+        rc = load().octal_extend_rocm(code.encode(), values, start, stop)
     else:
         raise ValueError(f"method must be one of {METHODS}, not {method!r}")
     if rc == -1:
@@ -123,9 +161,12 @@ def extend(code: str, values: np.ndarray, start: int, stop: int, method: str = "
         raise OverflowError("nim-value exceeds 65535")
     if rc == -3:
         raise MemoryError("octal backend: out of memory")
-    if rc == -4:
+    if rc == -4 and method == "gpu":
         raise RuntimeError("method='gpu': no usable Vulkan GPU, or the library was built without "
                            "Vulkan (needs octal_gpu_spv.h and libvulkan)")
+    if rc == -4:
+        raise RuntimeError("method='rocm': no usable ROCm GPU, or the library was built without "
+                           "ROCm (needs hipcc and libamdhip64)")
 
 
 def period(code: str, values: np.ndarray, n: int):

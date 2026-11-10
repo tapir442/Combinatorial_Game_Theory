@@ -4,6 +4,7 @@ from __future__ import annotations
 import colorsys
 import dataclasses
 import html
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -110,6 +111,45 @@ class _Progress:
             print(file=sys.stderr)
 
 
+# --------------------------------------------------------------- default method
+
+def _check_method(method: str) -> str:
+    if method not in _lib.METHODS:
+        raise ValueError(f"method must be one of {_lib.METHODS}, not {method!r}")
+    return method
+
+
+_default = {"method": _check_method(os.environ.get("OCTALGAMES_METHOD", "blocked")),
+            "threads": int(os.environ.get("OCTALGAMES_THREADS", "0"))}
+
+
+def set_default_method(method: str, threads: int = 0) -> None:
+    """Set the method that new sequences use when they are not given one.
+
+    The default is ``"blocked"`` (all CPU cores), or the environment variable
+    ``OCTALGAMES_METHOD`` (and ``OCTALGAMES_THREADS``) if set when octalgames is
+    imported.  Affects :func:`compute`, :class:`NimSequence` and :func:`survey`;
+    sequences created earlier keep their method.
+
+    Parameters
+    ----------
+    method
+        ``"brute"``, ``"blocked"``, ``"gpu"`` or ``"rocm"``.
+    threads
+        Threads for ``"blocked"`` (0 = all cores).
+
+    >>> set_default_method("blocked"); get_default_method()
+    'blocked'
+    """
+    _default["method"] = _check_method(method)
+    _default["threads"] = int(threads)
+
+
+def get_default_method() -> str:
+    """The method new sequences use when they are not given one (see :func:`set_default_method`)."""
+    return _default["method"]
+
+
 # --------------------------------------------------------------- sequence
 
 class NimSequence:
@@ -130,11 +170,12 @@ class NimSequence:
 
     Methods
     -------
-    ``method="brute"`` (default) computes one heap size after another on one
-    core.  ``method="blocked"`` computes blocks of heap sizes with ``threads``
-    threads (0 = all cores); it gives the same values and is much faster for
-    large n (not for hexadecimal codes).  ``method="gpu"`` does the parallel part
-    on a Vulkan GPU (see :func:`octalgames.gpu_name`).  The choice is stored and
+    ``method="brute"`` computes one heap size after another on one core.
+    ``method="blocked"`` (the default, see :func:`set_default_method`) computes
+    blocks of heap sizes with ``threads`` threads (0 = all cores); it gives the
+    same values and is much faster for large n (not for hexadecimal codes).  ``method="gpu"`` does the parallel part
+    on a Vulkan GPU (see :func:`octalgames.gpu_name`), ``method="rocm"`` on an AMD
+    GPU with ROCm (see :func:`octalgames.rocm_name`).  The choice is stored and
     used by later :meth:`extend` calls unless they pass their own.
 
     >>> NimSequence(".007", 20000, method="blocked", progress=False).method
@@ -142,9 +183,9 @@ class NimSequence:
     """
 
     def __init__(self, code: str, n: int = 0, *, progress: bool = True, chunk_seconds: float = 0.3,
-                 method: str = "brute", threads: int = 0):
-        if method not in _lib.METHODS:
-            raise ValueError(f"method must be one of {_lib.METHODS}, not {method!r}")
+                 method: Optional[str] = None, threads: Optional[int] = None):
+        method = _check_method(_default["method"] if method is None else method)
+        threads = _default["threads"] if threads is None else threads
         self.code = code
         self.name = _lib.rule_name(code)
         self.method = method
@@ -195,7 +236,7 @@ class NimSequence:
             Target duration of one C call.  Smaller values make interrupts more
             responsive.
         method
-            ``"brute"``, ``"blocked"`` or ``"gpu"``; default: the instance's
+            ``"brute"``, ``"blocked"``, ``"gpu"`` or ``"rocm"``; default: the instance's
             :attr:`method`.
         threads
             Threads for ``"blocked"`` (0 = all cores); default: the instance's
@@ -208,8 +249,7 @@ class NimSequence:
         """
         method = self.method if method is None else method
         threads = self.threads if threads is None else threads
-        if method not in _lib.METHODS:
-            raise ValueError(f"method must be one of {_lib.METHODS}, not {method!r}")
+        _check_method(method)
         start = len(self._G)
         if n <= start:
             return self

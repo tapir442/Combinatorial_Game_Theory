@@ -8,3 +8,4 @@ python/octalgames/liboctal.so
 out_*/
 site/
 doxygen/
+*.o

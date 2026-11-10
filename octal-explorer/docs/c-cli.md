@@ -23,6 +23,7 @@ rules `grundy` and `couples` (see [Concepts](concepts.md#game-codes)).
 | `--blocked` | off | blocked multi-threaded method: same values as brute force, much faster for large N (see [Internals](c-internals.md#the-blocked-mode)) |
 | `-j THREADS` | all cores | number of threads for `--blocked` |
 | `--gpu` | off | blocked method with the parallel part on a Vulkan GPU (see [Internals](c-internals.md#the-gpu-mode)); exits with an error if there is none |
+| `--rocm` | off | same as `--gpu`, on an AMD GPU with ROCm (HIP) instead of Vulkan |
 | `--check` | | compute with `--sparse` (or `--blocked`, if given) and with brute force, compare, and exit (status 1 on mismatch) |
 
 Progress is printed to stderr when stderr is a terminal.

@@ -11,18 +11,35 @@ GPUFLAGS = -DOCTAL_VULKAN
 GPULIBS  = -lvulkan
 endif
 GLSLANG ?= glslangValidator
+# ROCm support (--rocm / octal_extend_rocm()): on when hipcc is installed; `make ROCM=0`
+# builds without it.  ROCM_ARCH: GPU target(s), e.g. gfx1036 or gfx1100,gfx90a (default: this
+# machine's GPU)
+HIPCC   ?= hipcc
+ROCM    ?= $(shell command -v $(HIPCC) >/dev/null 2>&1 && echo 1)
+ROCM_ARCH ?= native
+# wave64: 1.8x faster than RDNA's default wave32 for this kernel (CDNA is wave64 anyway)
+HIPFLAGS ?= -O3 -mwavefrontsize64
+ifeq ($(ROCM),1)
+GPUFLAGS += -DOCTAL_ROCM
+ROCMOBJ  = octal_rocm.o
+GPULIBS  += -lamdhip64 -lstdc++
+endif
 
 LIB     = python/octalgames/liboctal.so
 
 all: octal $(LIB)
 
-octal: octal.c octal.h $(wildcard octal_gpu_spv.h)
-	$(CC) $(CFLAGS) $(OMPFLAGS) $(GPUFLAGS) -o $@ $< $(LDLIBS) $(GPULIBS)
+octal: octal.c octal.h $(wildcard octal_gpu_spv.h) $(ROCMOBJ)
+	$(CC) $(CFLAGS) $(OMPFLAGS) $(GPUFLAGS) -o $@ $< $(ROCMOBJ) $(LDLIBS) $(GPULIBS)
 
 # shared library used by the Python package (octalgames)
 lib: $(LIB)
-$(LIB): octal.c octal.h $(wildcard octal_gpu_spv.h)
-	$(CC) $(CFLAGS) $(OMPFLAGS) $(GPUFLAGS) -Wno-unused-function -shared -fPIC -DOCTAL_NO_MAIN -o $@ $< $(LDLIBS) $(GPULIBS)
+$(LIB): octal.c octal.h $(wildcard octal_gpu_spv.h) $(ROCMOBJ)
+	$(CC) $(CFLAGS) $(OMPFLAGS) $(GPUFLAGS) -Wno-unused-function -shared -fPIC -DOCTAL_NO_MAIN -o $@ $< $(ROCMOBJ) $(LDLIBS) $(GPULIBS)
+
+# ROCm (HIP) kernel and host code, linked into octal and the library
+octal_rocm.o: octal_rocm.hip
+	$(HIPCC) $(HIPFLAGS) -fPIC --offload-arch=$(ROCM_ARCH) -c $< -o $@
 
 # compile the GPU compute shader to SPIR-V, embedded as a C array (the result is committed,
 # so only needed after changing octal_gpu.comp; apt install glslang-tools)
@@ -36,6 +53,14 @@ test-gpu: octal
 	./octal grundy -n 60000 --gpu --check
 	./octal couples -n 60000 --gpu --check
 	./octal 4.07 -n 60000 --gpu --check
+
+# ROCm vs brute force (needs an AMD GPU with ROCm)
+test-rocm: octal
+	./octal .007 -n 100000 --rocm --check
+	./octal .6 -n 100000 --rocm --check
+	./octal grundy -n 60000 --rocm --check
+	./octal couples -n 60000 --rocm --check
+	./octal 4.07 -n 60000 --rocm --check
 
 # Thread-safety: 8 threads at once under ThreadSanitizer, compared with a sequential run
 test-threads: tests/thread_test.c octal.c octal.h
@@ -60,7 +85,7 @@ test: octal test-threads
 	./octal .07 -n 500 -q -o /tmp/octal-test-dawson && grep -q "period          34, preperiod 53 (PROVED" /tmp/octal-test-dawson/summary.txt && echo "Dawson's Kayles period 34 OK"
 
 clean:
-	rm -f octal $(LIB)
+	rm -f octal $(LIB) octal_rocm.o
 
 # Python environment (uv)
 venv: lib
@@ -96,4 +121,4 @@ doxygen:
 	doxygen Doxyfile
 	@test -s doxygen/warnings.log && cat doxygen/warnings.log || echo "doxygen: no warnings"
 
-.PHONY: all lib spv test test-gpu test-threads clean venv pytest lab docs docs-build bench bench-quick doxygen
+.PHONY: all lib spv test test-gpu test-rocm test-threads clean venv pytest lab docs docs-build bench bench-quick doxygen

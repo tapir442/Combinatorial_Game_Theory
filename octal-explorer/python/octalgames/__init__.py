@@ -11,18 +11,20 @@ The heavy lifting is done by the C code in ../octal.c, loaded through ctypes.
     s.extend(200_000)                  # continue the computation
     og.survey(og.octal_codes(2), 2000) # DataFrame over all two-digit octal games
 """
-from .core import NimSequence, Period, colormap, compute, octal_codes, palette, survey
+from .core import (NimSequence, Period, colormap, compute, get_default_method, octal_codes, palette,
+                   set_default_method, survey)
 from . import plot as _plot  # noqa: F401  (attaches plot methods)
 from .plot import (dashboard, plot_autocorr, plot_first_occurrence, plot_folded, plot_histogram,
                    plot_values, plot_wrap)
-from ._lib import gpu_name, rule_name
+from ._lib import gpu_name, rocm_name, rule_name
 
 try:  # widgets are optional
     from .widgets import explore
 except Exception:  # pragma: no cover
     explore = None
 
-__all__ = ["NimSequence", "Period", "compute", "survey", "octal_codes", "rule_name", "gpu_name", "palette",
+__all__ = ["NimSequence", "Period", "compute", "survey", "octal_codes", "rule_name", "gpu_name", "rocm_name", "palette",
            "colormap", "plot_values", "plot_wrap", "plot_autocorr", "plot_histogram",
-           "plot_first_occurrence", "plot_folded", "dashboard", "explore"]
+           "plot_first_occurrence", "plot_folded", "dashboard", "explore", "set_default_method",
+           "get_default_method"]
 __version__ = "0.1.0"

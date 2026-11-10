@@ -79,9 +79,10 @@ def test_threads_parallel_equal_sequential():
     from concurrent.futures import ThreadPoolExecutor
 
     codes = [".007", ".6", ".77", ".07", "grundy", "couples", ".137", ".164"]
-    seq = {c: og.compute(c, 3000, progress=False).values.copy() for c in codes}
+    seq = {c: og.compute(c, 3000, progress=False, method="brute").values.copy() for c in codes}
     with ThreadPoolExecutor(max_workers=8) as ex:
-        par = dict(zip(codes, ex.map(lambda c: og.compute(c, 3000, progress=False, chunk_seconds=0.001).values, codes)))
+        par = dict(zip(codes, ex.map(lambda c: og.compute(c, 3000, progress=False, chunk_seconds=0.001,
+                                                                    method="brute").values, codes)))
     for c in codes:
         assert np.array_equal(seq[c], par[c]), c
 
@@ -93,11 +94,11 @@ def test_threads_give_speedup():
 
     n = 40000
     t = time.perf_counter()
-    og.compute(".6", n, progress=False)
+    og.compute(".6", n, progress=False, method="brute")
     one = time.perf_counter() - t
     t = time.perf_counter()
     with ThreadPoolExecutor(max_workers=4) as ex:
-        list(ex.map(lambda c: og.compute(c, n, progress=False), [".6", ".007", ".07", ".137"]))
+        list(ex.map(lambda c: og.compute(c, n, progress=False, method="brute"), [".6", ".007", ".07", ".137"]))
     four = time.perf_counter() - t
     assert four < 2.5 * one, (one, four)
 
@@ -166,7 +167,7 @@ def test_blocked_equals_brute(code):
     """The blocked multi-threaded method gives exactly the brute-force values,
     also when computed in many small chunks that cut through blocks."""
     n = 3000 if code == ".f6" else 30000
-    a = og.compute(code, n, progress=False)
+    a = og.compute(code, n, progress=False, method="brute")
     b = og.compute(code, n, progress=False, method="blocked")
     c = og.compute(code, n, progress=False, method="blocked", threads=3, chunk_seconds=0.0005)
     assert np.array_equal(a.values, b.values)
@@ -190,7 +191,7 @@ def test_bad_method():
 @pytest.mark.parametrize("code", [".007", ".6", "grundy", "couples", "4.07"])
 def test_gpu_equals_brute(code):
     n = 60000
-    a = og.compute(code, n, progress=False)
+    a = og.compute(code, n, progress=False, method="brute")
     b = og.compute(code, n, progress=False, method="gpu", chunk_seconds=0.01)
     assert np.array_equal(a.values, b.values)
 
@@ -199,3 +200,40 @@ def test_gpu_unavailable_raises_or_works():
     if og.gpu_name() is None:
         with pytest.raises(RuntimeError):
             og.compute(".007", 40000, progress=False, method="gpu")
+
+
+@pytest.mark.skipif(og.rocm_name() is None, reason="no ROCm GPU / built without ROCm")
+@pytest.mark.parametrize("code", [".007", ".6", "grundy", "couples", "4.07"])
+def test_rocm_equals_brute(code):
+    n = 60000
+    a = og.compute(code, n, progress=False, method="brute")
+    b = og.compute(code, n, progress=False, method="rocm", chunk_seconds=0.01)
+    assert np.array_equal(a.values, b.values)
+
+
+def test_rocm_unavailable_raises():
+    if og.rocm_name() is None:
+        with pytest.raises(RuntimeError):
+            og.compute(".007", 40000, progress=False, method="rocm")
+
+
+def test_default_method():
+    assert og.get_default_method() == "blocked"
+    assert og.compute(".007", 100, progress=False).method == "blocked"
+    try:
+        og.set_default_method("brute")
+        assert og.compute(".007", 100, progress=False).method == "brute"
+        assert og.compute(".007", 100, progress=False, method="blocked").method == "blocked"
+        with pytest.raises(ValueError):
+            og.set_default_method("cuda")
+    finally:
+        og.set_default_method("blocked")
+
+
+def test_default_method_from_environment():
+    import subprocess
+    import sys
+    code = "import octalgames as og; print(og.get_default_method(), og.compute('.07', 50, progress=False).method)"
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                       env={**__import__("os").environ, "OCTALGAMES_METHOD": "brute"})
+    assert r.stdout.split() == ["brute", "brute"], r.stderr

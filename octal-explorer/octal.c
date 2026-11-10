@@ -35,7 +35,9 @@
  * OpenMP, only the few pairs inside the block are done sequentially (see
  * extend_blocked()).  Same values as brute force; needs -fopenmp for threads.
  * `--gpu` does the parallel scan of each block on a GPU with a Vulkan compute
- * shader (octal_gpu.comp, see extend_gpu()); needs -DOCTAL_VULKAN -lvulkan.
+ * shader (octal_gpu.comp, see extend_device()); needs -DOCTAL_VULKAN -lvulkan.
+ * `--rocm` does the same with a HIP kernel (octal_rocm.hip, compiled with
+ * hipcc and linked in); needs -DOCTAL_ROCM and the object file.
  *
  * Caching: there is no memo/hash table of positions.  Values are computed
  * bottom-up (dynamic programming) into one array G; G(n) is read off the
@@ -55,6 +57,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -102,7 +105,7 @@ typedef struct {
     unsigned mask;       /**< rare/common mask (valid if sparse) */
     long nrare;          /**< number of rare heap sizes (valid if sparse) */
     long long pairs;     /**< two-heap pairs examined (work counter) */
-    int blocked;         /**< 1: blocked method on the CPU was used, 2: on the GPU */
+    int blocked;         /**< blocked method used: 1 CPU, 2 GPU (Vulkan), 3 GPU (ROCm) */
     int threads;         /**< threads used by the blocked method */
 } Result;
 
@@ -522,10 +525,19 @@ static int store_value(Scratch *S, uint16_t *G, long n, unsigned g, unsigned *ma
  * per heap), the pair a == b, and all 0-, 1- and 3-heap options
  * (mark_simple()).  G(n) is the mex over marks row n and the stamp table.
  *
+ * @param S       scratch (stamp table); grown when new maxima appear
+ * @param R       rule
+ * @param G       nim-values; G[0..n0) valid, G[n0..n0+B) is written
+ * @param n0      first heap size of the block
+ * @param B       number of heap sizes in the block
+ * @param vcap0   value capacity when the block was scanned (row length of @p marks)
  * @param marks   B rows of option marks for values < vcap0: one byte per value
  *                (block_scan()), or with @p bitset one bit per value in
  *                uint32 words, ceil(vcap0/32) words per row (the GPU scan)
  * @param bitset  layout of @p marks, see above
+ * @param maxG    in/out: largest value so far
+ * @param vcap    in/out: power of two above @p maxG
+ * @param pairs   incremented by the number of two-heap splits examined
  * @return 0, -2 or -3 (see store_value()); G is valid up to where it stopped
  */
 static int block_finish(Scratch *S, const Rule *R, uint16_t *G, long n0, long B, unsigned vcap0,
@@ -627,6 +639,8 @@ static int extend_blocked(const Rule *R, uint16_t *G, long from, long to, int th
 }
 
 /* ------------------------------------------------------------ GPU (Vulkan) */
+/* GPU backends share one driver, extend_device(); each backend only scans a
+ * block (like block_scan()) on its device. */
 
 /** The GPU method computes heap sizes below this on the CPU (extend_blocked()). */
 #define GPU_MIN_N 32768
@@ -638,8 +652,38 @@ static int extend_blocked(const Rule *R, uint16_t *G, long from, long to, int th
 /** Size of the buffer that receives the GPU option bitsets (bytes). */
 #define GPU_MARK_BYTES (64L << 20)
 
+/** Parameters of one GPU block scan; also the push constants of octal_gpu.comp
+ *  and the kernel arguments in octal_rocm.hip (same order and types). */
+typedef struct {
+    int32_t n0, nwords, t;  /**< first heap of the block, bitset words per heap, last digit index */
+    uint32_t km[3];         /**< bit k: digit d_k allows a two-heap split (k = 0..64) */
+} GpuPush;
+
+/**
+ * @brief A GPU backend for extend_device() (Vulkan or ROCm).
+ *
+ * All functions are called with gpu_lock held, one computation at a time.
+ */
+typedef struct {
+    /** Prepare the device once (later calls are cheap); copy its name into
+     *  @p name unless NULL.  0 if usable, -1 if not. */
+    int (*init)(char *name, int len);
+    /** Start a computation of heap sizes < @p to: upload G[0..from), allocate
+     *  @p mark_bytes for the option bitsets.  0, -3 or -4. */
+    int (*begin)(const uint16_t *G, long from, long to, size_t mark_bytes);
+    /** Scan one block (see octal_gpu.comp) and return its B * nwords bitset
+     *  words in host memory, valid until the next call; NULL on error. */
+    const uint32_t *(*scan)(const GpuPush *pc, long B);
+    /** Upload the finished values G[n0..n0+B).  0, or -4 on error. */
+    int (*append)(const uint16_t *G, long n0, long B);
+    /** Free what begin() allocated. */
+    void (*end)(void);
+} Device;
+
+/** Serialises all GPU use: one GPU computation at a time per process. */
+static pthread_mutex_t gpu_lock = PTHREAD_MUTEX_INITIALIZER;
+
 #ifdef OCTAL_VULKAN
-#include <pthread.h>
 #include <vulkan/vulkan.h>
 #include "octal_gpu_spv.h"   /* SPIR-V of octal_gpu.comp: const uint32_t octal_gpu_spv[] */
 
@@ -647,8 +691,7 @@ static int extend_blocked(const Rule *R, uint16_t *G, long from, long to, int th
  * @brief The Vulkan objects shared by all GPU computations.
  *
  * Created once, on first use, by gpu_init() and kept until the process exits.
- * Every use is serialised by gpu_lock: GPU computations from several threads
- * run one after another (the GPU is one shared device anyway).
+ * Every use is serialised by gpu_lock.
  */
 static struct {
     int state;                        /**< 0 not tried yet, 1 ready, -1 unavailable */
@@ -666,13 +709,6 @@ static struct {
     VkFence fence;
     char name[256];                   /**< device name, e.g. "AMD Radeon ..." */
 } gpu;
-static pthread_mutex_t gpu_lock = PTHREAD_MUTEX_INITIALIZER;
-
-/** Push constants of octal_gpu.comp (same order and types). */
-typedef struct {
-    int32_t n0, nwords, t;
-    uint32_t km[3];
-} GpuPush;
 
 /**
  * @brief Create the Vulkan device, compute pipeline and command buffer (once).
@@ -838,17 +874,64 @@ static void gpu_buf_free(GpuBuf *g) {
     memset(g, 0, sizeof *g);
 }
 
+/** Vulkan state of the running computation (one at a time, under gpu_lock). */
+static GpuBuf vk_gb, vk_mb;
+static VkDescriptorSet vk_ds;
+
+/** Device::init for Vulkan. */
+static int vk_init(char *name, int len) {
+    if (gpu_init()) return -1;
+    if (name) snprintf(name, (size_t)len, "%s", gpu.name);
+    return 0;
+}
+
+/** Device::end for Vulkan: free the buffers of the computation. */
+static void vk_end(void) {
+    if (vk_ds) vkFreeDescriptorSets(gpu.dev, gpu.dpool, 1, &vk_ds);
+    vk_ds = VK_NULL_HANDLE;
+    gpu_buf_free(&vk_gb);
+    gpu_buf_free(&vk_mb);
+}
+
 /**
- * @brief Run octal_gpu.comp on one block and wait for it.
- * @return 0, or -4 on a Vulkan error
+ * Device::begin for Vulkan.  The nim-values live in a host-visible buffer (two
+ * uint16 per uint32, little-endian host assumed): no copies on integrated GPUs
+ * and discrete GPUs with resizable BAR, reads over PCIe on other discrete GPUs.
  */
-static int gpu_scan(VkDescriptorSet ds, const GpuPush *pc, long B) {
+static int vk_begin(const uint16_t *G, long from, long to, size_t mark_bytes) {
+    if (gpu_buf_create(&vk_gb, (VkDeviceSize)((to + 1) / 2) * 4, 0) ||
+        gpu_buf_create(&vk_mb, mark_bytes, 1)) {
+        vk_end();
+        return -3;
+    }
+    VkDescriptorSetAllocateInfo dai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                       .descriptorPool = gpu.dpool, .descriptorSetCount = 1,
+                                       .pSetLayouts = &gpu.dsl};
+    if (vkAllocateDescriptorSets(gpu.dev, &dai, &vk_ds) != VK_SUCCESS) {
+        vk_ds = VK_NULL_HANDLE;
+        vk_end();
+        return -4;
+    }
+    VkDescriptorBufferInfo dbi[2] = {{vk_gb.buf, 0, VK_WHOLE_SIZE}, {vk_mb.buf, 0, VK_WHOLE_SIZE}};
+    VkWriteDescriptorSet w[2];
+    for (int i = 0; i < 2; i++)
+        w[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = vk_ds,
+                                      .dstBinding = (uint32_t)i, .descriptorCount = 1,
+                                      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                      .pBufferInfo = &dbi[i]};
+    vkUpdateDescriptorSets(gpu.dev, 2, w, 0, NULL);
+    memcpy(vk_gb.map, G, (size_t)from * sizeof *G);
+    return 0;
+}
+
+/** Device::scan for Vulkan: run octal_gpu.comp on one block and wait for it. */
+static const uint32_t *vk_scan(const GpuPush *pc, long B) {
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     if (vkResetCommandBuffer(gpu.cmd, 0) != VK_SUCCESS || vkBeginCommandBuffer(gpu.cmd, &bi) != VK_SUCCESS)
-        return -4;
+        return NULL;
     vkCmdBindPipeline(gpu.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gpu.pipe);
-    vkCmdBindDescriptorSets(gpu.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gpu.layout, 0, 1, &ds, 0, NULL);
+    vkCmdBindDescriptorSets(gpu.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gpu.layout, 0, 1, &vk_ds, 0, NULL);
     vkCmdPushConstants(gpu.cmd, gpu.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof *pc, pc);
     vkCmdDispatch(gpu.cmd, (uint32_t)B, 1, 1);
     /* make the shader's writes visible to the host after the fence */
@@ -856,82 +939,94 @@ static int gpu_scan(VkDescriptorSet ds, const GpuPush *pc, long B) {
                           .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
     vkCmdPipelineBarrier(gpu.cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb,
                          0, NULL, 0, NULL);
-    if (vkEndCommandBuffer(gpu.cmd) != VK_SUCCESS) return -4;
+    if (vkEndCommandBuffer(gpu.cmd) != VK_SUCCESS) return NULL;
     VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1,
                        .pCommandBuffers = &gpu.cmd};
-    if (vkQueueSubmit(gpu.queue, 1, &si, gpu.fence) != VK_SUCCESS) return -4;
+    if (vkQueueSubmit(gpu.queue, 1, &si, gpu.fence) != VK_SUCCESS) return NULL;
     VkResult r = vkWaitForFences(gpu.dev, 1, &gpu.fence, VK_TRUE, UINT64_MAX);
     vkResetFences(gpu.dev, 1, &gpu.fence);
-    return r == VK_SUCCESS ? 0 : -4;
+    return r == VK_SUCCESS ? vk_mb.map : NULL;
 }
 
-/** Name of the GPU into @p name (0), or -4 if none is usable. */
-static int gpu_name(char *name, int len) {
+/** Device::append for Vulkan: the finished block, for the next blocks to read. */
+static int vk_append(const uint16_t *G, long n0, long B) {
+    memcpy((uint16_t *)vk_gb.map + n0, G + n0, (size_t)B * sizeof *G);
+    return 0;
+}
+
+static const Device vulkan_device = {vk_init, vk_begin, vk_scan, vk_append, vk_end};
+#define VULKAN_DEVICE (&vulkan_device)
+#else
+#define VULKAN_DEVICE NULL
+#endif /* OCTAL_VULKAN */
+
+/* ----------------------------------------------------------------- ROCm (HIP) */
+
+#ifdef OCTAL_ROCM
+/* Implemented in octal_rocm.hip (compiled with hipcc). */
+int octal_rocm_dev_init(char *name, int len);
+int octal_rocm_dev_begin(const uint16_t *G, long from, long to, size_t mark_bytes);
+const uint32_t *octal_rocm_dev_scan(const GpuPush *pc, long B);
+int octal_rocm_dev_append(const uint16_t *G, long n0, long B);
+void octal_rocm_dev_end(void);
+static const Device rocm_device = {octal_rocm_dev_init, octal_rocm_dev_begin, octal_rocm_dev_scan,
+                                   octal_rocm_dev_append, octal_rocm_dev_end};
+#define ROCM_DEVICE (&rocm_device)
+#else
+#define ROCM_DEVICE NULL
+#endif /* OCTAL_ROCM */
+
+/* ------------------------------------------------------- GPU block driver */
+
+/** Name of @p D's GPU into @p name (0), or -4 if @p D is NULL or has no usable GPU. */
+static int device_name(const Device *D, char *name, int len) {
+    if (!D) return -4;
     pthread_mutex_lock(&gpu_lock);
-    int rc = gpu_init() ? -4 : 0;
-    if (!rc) snprintf(name, (size_t)len, "%s", gpu.name);
+    int rc = D->init(name, len) ? -4 : 0;
     pthread_mutex_unlock(&gpu_lock);
     return rc;
 }
 
 /**
- * @brief Compute G[from..to) with the blocked method, scanning blocks on the GPU.
+ * @brief Compute G[from..to) with the blocked method, scanning blocks on a GPU.
  *
- * Like extend_blocked(), but block_scan() runs as the compute shader
- * octal_gpu.comp: one workgroup per heap of the block, option bitsets in
- * shared memory.  block_finish() stays on one CPU core; the blocks are smaller
- * (B ~ n0/128) to keep that sequential part small.  Heap sizes below GPU_MIN_N
- * are computed with extend_blocked() on all CPU cores.
+ * Like extend_blocked(), but block_scan() runs on the device @p D (Vulkan
+ * shader octal_gpu.comp or HIP kernel octal_rocm.hip): one workgroup per heap of
+ * the block, option bitsets in shared memory.  block_finish() stays on one CPU
+ * core; the blocks are smaller (B ~ n0/128) to keep that sequential part small.
+ * Heap sizes below GPU_MIN_N are computed with extend_blocked() on all CPU
+ * cores.  Calls are serialised by gpu_lock.
  *
- * The nim-values live in a host-visible buffer that the CPU appends each
- * finished block to; this is fast on integrated GPUs (shared memory) and on
- * discrete GPUs with resizable BAR, slower otherwise.  Assumes a
- * little-endian host (the shader reads two uint16 per uint32).
- *
+ * @param D      device backend, or NULL if not compiled in
+ * @param R      rule
+ * @param G      array of at least @p to entries; G[0..from) valid
+ * @param from   first heap size to compute
+ * @param to     one past the last heap size
+ * @param pairs  incremented by the number of two-heap splits examined
  * @return 0, -2 (value > 65535), -3 (out of memory) or -4 (no usable GPU, or
- *         a Vulkan error); G is valid up to where it stopped
+ *         a GPU error); G is valid up to where it stopped
  */
-static int extend_gpu(const Rule *R, uint16_t *G, long from, long to, long long *pairs) {
-    pthread_mutex_lock(&gpu_lock);
-    int ok = gpu_init() == 0;
-    pthread_mutex_unlock(&gpu_lock);
-    if (!ok) return -4;
+static int extend_device(const Device *D, const Rule *R, uint16_t *G, long from, long to,
+                         long long *pairs) {
+    if (device_name(D, NULL, 0)) return -4;
     if (from < GPU_MIN_N) {
         long e = to < GPU_MIN_N ? to : GPU_MIN_N;
         int rc = extend_blocked(R, G, from, e, 0, pairs);
         if (rc || e == to) return rc;
         from = e;
     }
-
     pthread_mutex_lock(&gpu_lock);
-    int rc = 0;
-    GpuBuf gb = {0}, mb = {0};
-    VkDescriptorSet ds = VK_NULL_HANDLE;
     Scratch S = {0};
-    if (gpu_buf_create(&gb, (VkDeviceSize)((to + 1) / 2) * 4, 0) || gpu_buf_create(&mb, GPU_MARK_BYTES, 1)) {
-        rc = -3;
-        goto done;
+    int rc = D->begin(G, from, to, GPU_MARK_BYTES);
+    if (rc) {
+        pthread_mutex_unlock(&gpu_lock);
+        return rc;
     }
-    VkDescriptorSetAllocateInfo dai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-                                       .descriptorPool = gpu.dpool, .descriptorSetCount = 1,
-                                       .pSetLayouts = &gpu.dsl};
-    if (vkAllocateDescriptorSets(gpu.dev, &dai, &ds) != VK_SUCCESS) { rc = -4; goto done; }
-    VkDescriptorBufferInfo dbi[2] = {{gb.buf, 0, VK_WHOLE_SIZE}, {mb.buf, 0, VK_WHOLE_SIZE}};
-    VkWriteDescriptorSet w[2];
-    for (int i = 0; i < 2; i++)
-        w[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds,
-                                      .dstBinding = (uint32_t)i, .descriptorCount = 1,
-                                      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                      .pBufferInfo = &dbi[i]};
-    vkUpdateDescriptorSets(gpu.dev, 2, w, 0, NULL);
-
-    uint16_t *dG = gb.map;
-    memcpy(dG, G, (size_t)from * sizeof *G);
     unsigned maxG = 0, vcap = 2;
     for (long i = 0; i < from; i++)
         if (G[i] > maxG) maxG = G[i];
     while (vcap <= maxG) vcap *= 2;
-    if (scratch_reserve(&S, 2 * (size_t)vcap + 2)) { rc = -3; goto done; }
+    if (scratch_reserve(&S, 2 * (size_t)vcap + 2)) rc = -3;
     GpuPush pc = {.t = R->t};
     for (int k = 0; k <= R->t; k++)
         if (R->d[k] & 4) pc.km[k / 32] |= 1u << (k % 32);
@@ -946,31 +1041,19 @@ static int extend_gpu(const Rule *R, uint16_t *G, long from, long to, long long 
         pc.n0 = (int32_t)n;
         pc.nwords = nwords;
         unsigned vcap0 = vcap;
-        rc = gpu_scan(ds, &pc, B);
+        const uint32_t *marks = D->scan(&pc, B);
+        if (!marks) { rc = -4; break; }
+        rc = block_finish(&S, R, G, n, B, vcap0, marks, 1, &maxG, &vcap, pairs);
         if (rc) break;
-        rc = block_finish(&S, R, G, n, B, vcap0, mb.map, 1, &maxG, &vcap, pairs);
-        if (rc) break;
-        memcpy(dG + n, G + n, (size_t)B * sizeof *G);   /* the next blocks read them */
+        if (D->append(G, n, B)) { rc = -4; break; }   /* the next blocks read them */
         n += B;
     }
-done:
-    if (ds) vkFreeDescriptorSets(gpu.dev, gpu.dpool, 1, &ds);
-    gpu_buf_free(&gb);
-    gpu_buf_free(&mb);
+    D->end();
     scratch_free(&S);
     pthread_mutex_unlock(&gpu_lock);
     return rc;
 }
-#else  /* !OCTAL_VULKAN */
-static int gpu_name(char *name, int len) {
-    (void)name; (void)len;
-    return -4;
-}
-static int extend_gpu(const Rule *R, uint16_t *G, long from, long to, long long *pairs) {
-    (void)R; (void)G; (void)from; (void)to; (void)pairs;
-    return -4;
-}
-#endif /* OCTAL_VULKAN */
+
 
 /**
  * @brief Compute G(0) .. G(N-1) (command-line program).
@@ -984,7 +1067,8 @@ static int extend_gpu(const Rule *R, uint16_t *G, long from, long to, long long 
  * @param R             rule
  * @param N             number of heap sizes
  * @param allow_sparse  enable the experimental sparse method
- * @param blocked       1: use extend_blocked(), 2: extend_gpu() (ignores @p allow_sparse)
+ * @param blocked       1: use extend_blocked(), 2: extend_device() with Vulkan,
+ *                      3: with ROCm (ignores @p allow_sparse)
  * @param threads       threads for the blocked method, <= 0 for all
  * @return the sequence and statistics; the caller frees Result.G
  */
@@ -1001,15 +1085,17 @@ static Result compute(const Rule *R, long N, int allow_sparse, int blocked, int 
         for (long n = 0; n < N;) {
             long e = n + (n < 65536 ? 65536 : n / 8);
             if (e > N) e = N;
-            int rc = blocked == 2 ? extend_gpu(R, G, n, e, &res.pairs)
+            int rc = blocked == 2 ? extend_device(VULKAN_DEVICE, R, G, n, e, &res.pairs)
+                   : blocked == 3 ? extend_device(ROCM_DEVICE, R, G, n, e, &res.pairs)
                                   : extend_blocked(R, G, n, e, threads, &res.pairs);
             if (rc == -2) die("nim-value exceeds 65535; not supported");
-            if (rc == -4) die("no usable GPU (Vulkan), or not built with -DOCTAL_VULKAN");
+            if (rc == -4 && blocked == 2) die("no usable GPU (Vulkan), or not built with -DOCTAL_VULKAN");
+            if (rc == -4) die("no usable ROCm GPU, or not built with -DOCTAL_ROCM");
             if (rc) die("out of memory");
             n = e;
             if (show)
                 fprintf(stderr, "\r  n = %ld / %ld  (%.0f%%, %s, %.0f s)   ", n, N, 100.0 * n / N,
-                        blocked == 2 ? "gpu" : "blocked", now() - t0);
+                        blocked == 3 ? "rocm" : blocked == 2 ? "gpu" : "blocked", now() - t0);
         }
         if (show) fprintf(stderr, "\r%78s\r", "");
         res.secs = now() - t0;
@@ -1733,18 +1819,31 @@ int octal_extend_blocked(const char *code, uint16_t *G, long from, long to, int 
     return extend_blocked(&R, G, from, to, threads, &pairs);
 }
 
-/** See octal.h.  Fill G[from..to) with extend_gpu().  Returns 0, -1, -2, -3
- *  like octal_extend(), or -4 if no GPU is usable. */
+/** See octal.h.  Fill G[from..to) with extend_device() on Vulkan.  Returns 0,
+ *  -1, -2, -3 like octal_extend(), or -4 if no GPU is usable. */
 int octal_extend_gpu(const char *code, uint16_t *G, long from, long to) {
     Rule R;
     if (parse_rule(code, &R)) return -1;
     long long pairs = 0;
-    return extend_gpu(&R, G, from, to, &pairs);
+    return extend_device(VULKAN_DEVICE, &R, G, from, to, &pairs);
 }
 
 /** See octal.h.  Name of the GPU used by octal_extend_gpu(); 0, or -4 if none. */
 int octal_gpu_name(char *name, int len) {
-    return gpu_name(name, len);
+    return device_name(VULKAN_DEVICE, name, len);
+}
+
+/** See octal.h.  Like octal_extend_gpu(), on ROCm (HIP). */
+int octal_extend_rocm(const char *code, uint16_t *G, long from, long to) {
+    Rule R;
+    if (parse_rule(code, &R)) return -1;
+    long long pairs = 0;
+    return extend_device(ROCM_DEVICE, &R, G, from, to, &pairs);
+}
+
+/** See octal.h.  Name of the GPU used by octal_extend_rocm(); 0, or -4 if none. */
+int octal_rocm_name(char *name, int len) {
+    return device_name(ROCM_DEVICE, name, len);
 }
 
 /** See octal.h.  Wraps find_period() without saltus: returns 0 none,
@@ -1791,7 +1890,8 @@ static void usage(void) {
 "  --blocked   blocked multi-threaded method (same values as brute force)\n"
 "  -j THREADS  threads for --blocked (default: all cores)\n"
 "  --gpu       blocked method with the parallel part on the GPU (Vulkan)\n"
-"  --check     compare --sparse (default), --blocked or --gpu with brute force\n"
+"  --rocm      same, on an AMD GPU with ROCm (HIP)\n"
+"  --check     compare --sparse (default), --blocked, --gpu or --rocm with brute force\n"
 "  -p          print the sequence to stdout and skip output files\n"
 "  -q          quiet\n");
     exit(2);
@@ -1811,7 +1911,7 @@ int main(int argc, char **argv) {
     const char *dir = NULL;
     static struct option lo[] = {{"brute", no_argument, 0, 'b'}, {"sparse", no_argument, 0, 's'},
                                  {"check", no_argument, 0, 'c'}, {"blocked", no_argument, 0, 'B'},
-                                 {"gpu", no_argument, 0, 'G'},
+                                 {"gpu", no_argument, 0, 'G'}, {"rocm", no_argument, 0, 'R'},
                                  {"help", no_argument, 0, 'h'}, {0, 0, 0, 0}};
     int c;
     while ((c = getopt_long(argc, argv, "n:o:w:L:e:j:pqh", lo, NULL)) != -1) {
@@ -1826,6 +1926,7 @@ int main(int argc, char **argv) {
         case 'c': check = 1; break;
         case 'B': blocked = 1; break;
         case 'G': blocked = 2; break;
+        case 'R': blocked = 3; break;
         case 'j': threads = atoi(optarg); break;
         case 'p': print = 1; break;
         case 'q': quiet = 1; break;
@@ -1841,14 +1942,14 @@ int main(int argc, char **argv) {
 
     if (check) {
         Result b = compute(&R, N, 0, 0, 0);
-        const char *m = blocked == 2 ? "gpu" : blocked ? "blocked" : "sparse";
+        const char *m = blocked == 3 ? "rocm" : blocked == 2 ? "gpu" : blocked ? "blocked" : "sparse";
         for (long n = 0; n < N; n++)
             if (b.G[n] != res.G[n]) {
                 printf("MISMATCH at n = %ld: %s %u, brute %u\n", n, m, res.G[n], b.G[n]);
                 return 1;
             }
-        if (blocked == 2)
-            printf("check OK: %s, n < %ld, gpu %.2f s, brute %.2f s\n", R.code, N, res.secs, b.secs);
+        if (blocked >= 2)
+            printf("check OK: %s, n < %ld, %s %.2f s, brute %.2f s\n", R.code, N, m, res.secs, b.secs);
         else if (blocked)
             printf("check OK: %s, n < %ld, blocked %.2f s (%d threads), brute %.2f s\n", R.code, N,
                    res.secs, res.threads, b.secs);
@@ -1920,8 +2021,8 @@ int main(int argc, char **argv) {
         if (!g) continue;
         fprintf(g, "%s\n", R.name);
         fprintf(g, "heap sizes      0 .. %ld\n", N - 1);
-        if (res.blocked == 2)
-            fprintf(g, "time            %.2f s (gpu)\n", res.secs);
+        if (res.blocked >= 2)
+            fprintf(g, "time            %.2f s (%s)\n", res.secs, res.blocked == 3 ? "rocm" : "gpu");
         else if (res.blocked)
             fprintf(g, "time            %.2f s (blocked, %d threads)\n", res.secs, res.threads);
         else

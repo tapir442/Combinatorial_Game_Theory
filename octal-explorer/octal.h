@@ -129,6 +129,23 @@ int octal_extend_gpu(const char *code, uint16_t *G, long from, long to);
 int octal_gpu_name(char *name, int len);
 
 /**
+ * @brief Like octal_extend_gpu(), but with a HIP kernel on an AMD GPU (ROCm).
+ *
+ * Keeps the nim-values in device memory and copies explicitly, so it also suits
+ * discrete GPUs.  Needs a library built with -DOCTAL_ROCM and linked with
+ * octal_rocm.o (compiled by hipcc from octal_rocm.hip) and -lamdhip64.  Same
+ * values and return codes as octal_extend_gpu(); -4 if there is no usable ROCm
+ * GPU or no ROCm support built in.
+ */
+int octal_extend_rocm(const char *code, uint16_t *G, long from, long to);
+
+/**
+ * @brief Name and architecture of the GPU that octal_extend_rocm() uses.
+ * @return 0, or -4 if there is no usable ROCm GPU (or no ROCm support built in)
+ */
+int octal_rocm_name(char *name, int len);
+
+/**
  * @brief Search for an eventual period of G[0..N).
  *
  * For each candidate period p (smallest first), the preperiod i is the

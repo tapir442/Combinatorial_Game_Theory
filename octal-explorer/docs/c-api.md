@@ -85,6 +85,17 @@ when the Vulkan headers are installed).  `octal_gpu_name` writes the device name
 or returns −4.  The device is created on the first call and kept; concurrent calls run one after
 another.  See [Internals](c-internals.md#the-gpu-mode).
 
+### `octal_extend_rocm`
+
+```c
+int octal_extend_rocm(const char *code, uint16_t *G, long from, long to);
+int octal_rocm_name(char *name, int len);
+```
+
+The same with a HIP kernel on an AMD GPU (ROCm) instead of Vulkan.  Needs a library built with
+`-DOCTAL_ROCM` and linked with `octal_rocm.o` (from `hipcc`) and `-lamdhip64`; the Makefile and
+the Python package do this when `hipcc` is installed.  Returns −4 otherwise.
+
 ### `octal_period`
 
 ```c
