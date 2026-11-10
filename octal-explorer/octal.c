@@ -60,6 +60,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <getopt.h>
+#include <limits.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -123,6 +124,7 @@ typedef struct {
     int threads;              /**< threads: 1 = plain algorithm, > 1 = speculation + parallel check */
     long long speculated;     /**< values computed speculatively (step 1 only) */
     long long restarts;       /**< speculative chunks that failed the check (a new rare value) */
+    long long bytes;          /**< speculative values computed with one byte per value (RareBytes) */
 } RareStats;
 
 /** @brief Result of compute(): the nim-sequence plus statistics. */
@@ -851,10 +853,181 @@ static long rare_chunk_end(long x, long end) {
 }
 
 /**
+ * @brief One byte per value for the speculation (Grossman 2017, section 3.2).
+ *
+ * Let j be a bit of the mask below 512.  Deleting bit j from a value,
+ * byte(v) = (v & (2^j - 1)) | ((v >> (j + 1)) << j), is linear under XOR, and
+ * on the common values below 512 it is one-to-one onto 0..255: for a common v
+ * the parity condition fixes bit j.  So while all values are below 512, step 1
+ * can work on bytes: `g8` holds byte(G(i)), the mark table has 256 entries, and
+ * the speculation reads half as much memory (the last ~20,000 values of Officers
+ * then fit in the 32 KB L1 cache instead of 40 KB).
+ *
+ * Step 1 marks G(a) ^ G(b) for a rare and b = m - a.  On bytes this is only
+ * correct if the result is common, i.e. if b is never rare: then two different
+ * marked values never share a byte.  That holds once n > 2 * (largest rare heap
+ * size) + t, since then b > the largest rare heap size.  Before that, for codes
+ * with 3-heap moves, and once a value reaches 512, rare_speculate() uses
+ * rare_step1() instead.  So the speculative values are the same either way
+ * (a debug build comparing both for every speculated heap size of .6, grundy,
+ * couples and .77 up to 2*10^6 found no difference).
+ *
+ * Life cycle:
+ * - rb_setup() at every mask (re)choice in extend_rare(): picks j (the highest
+ *   mask bit below 512), the list of common values and their bytes, and resets
+ *   g8 and the byte copy of the rare list; or switches the byte mode off.
+ * - rb_catch_up() at the start of each rare_speculate(): fills g8 from G up
+ *   to the first heap size of the chunk (values computed elsewhere, e.g. exact
+ *   values after a failed check) and copies new rare heap sizes.
+ * - rare_speculate() writes byte(g) for every speculative value it stores.
+ * - After a failed check at heap size f, rare_spec_run() sets known = f, so the
+ *   discarded speculative bytes from f on are refilled before they are read.
+ * - A value of 512 or more switches the byte mode off for the rest of the
+ *   computation (until the next rb_setup()).
+ *
+ * Effect (Ryzen 9 7900X, 24 threads): .6 to 10^7 in 10.4 s instead of 14.2 s;
+ * the speculating thread computes 7.7 s instead of 13.0 s.
+ *
+ * Owned by the speculating thread (thread 0 of rare_spec_run()).
+ */
+typedef struct {
+    int on;                   /**< usable: no 3-heap moves, all values < 512, mask has a bit below 512 */
+    unsigned drop;            /**< the deleted bit j */
+    uint8_t *g8;              /**< g8[i] = byte(G(i)) for i < known */
+    long known, cap;          /**< valid entries / allocated entries of g8 */
+    uint32_t *rpos;           /**< rare heap sizes ... */
+    uint8_t *rval;            /**< ... and the bytes of their values */
+    long nr, rcap;            /**< entries / capacity of rpos and rval */
+    uint16_t common[256];     /**< the common values below 512, ascending ... */
+    uint8_t cbyte[256];       /**< ... and their bytes */
+    int ncommon;              /**< number of entries of common (256 if the mask has a bit below 512) */
+    uint32_t mark[256];       /**< mark table, indexed by byte, stamped with n */
+} RareBytes;
+
+/** byte(v): delete bit @p j (see RareBytes). */
+static inline unsigned rb_byte(unsigned v, unsigned j) {
+    return (v & ((1u << j) - 1)) | ((v >> (j + 1)) << j);
+}
+
+/** Free @p B and reset it to zero. */
+static void rb_free(RareBytes *B) {
+    free(B->g8);
+    free(B->rpos);
+    free(B->rval);
+    memset(B, 0, sizeof *B);
+}
+
+/**
+ * @brief Prepare @p B for a new mask (at every mask (re)choice).
+ *
+ * Keeps the allocations; g8 and the rare list are refilled lazily by
+ * rb_catch_up().  Turns the byte mode off where it does not apply.
+ *
+ * @param B     byte state
+ * @param R     rule (byte mode needs no 3-heap moves)
+ * @param mask  the new rare-value mask
+ * @param maxG  largest value so far (byte mode needs < 512)
+ * @param to    one past the largest heap size that will be computed
+ * @return 0, or -3 if out of memory
+ */
+static int rb_setup(RareBytes *B, const Rule *R, unsigned mask, unsigned maxG, long to) {
+    unsigned low = mask & 0x1ff;
+    B->on = !R->hex && maxG < 512 && low != 0;
+    B->known = 0;
+    B->nr = 0;
+    if (!B->on) return 0;
+    B->drop = 31 - (unsigned)__builtin_clz(low);
+    if (to > B->cap) {
+        uint8_t *p = realloc(B->g8, (size_t)to);
+        if (!p) return -3;
+        B->g8 = p;
+        B->cap = to;
+    }
+    B->ncommon = 0;
+    for (unsigned v = 0; v < 512; v++)
+        if (!rv_rare(v, mask)) {
+            B->common[B->ncommon] = (uint16_t)v;
+            B->cbyte[B->ncommon++] = (uint8_t)rb_byte(v, B->drop);
+        }
+    memset(B->mark, 0xff, sizeof B->mark);
+    return 0;
+}
+
+/**
+ * @brief Bring g8 up to heap size @p n and the byte copy of the rare list up to @p nrare.
+ * @return 0, or -3 if out of memory (byte mode is then switched off)
+ */
+static int rb_catch_up(RareBytes *B, const uint16_t *G, long n, const long *rare, long nrare) {
+    for (; B->known < n; B->known++) {
+        if (G[B->known] >= 512) { B->on = 0; return 0; }
+        B->g8[B->known] = (uint8_t)rb_byte(G[B->known], B->drop);
+    }
+    if (nrare > B->rcap) {
+        long c = B->rcap ? 2 * B->rcap : 2048;
+        while (c < nrare) c *= 2;
+        uint32_t *p = realloc(B->rpos, (size_t)c * sizeof *p);
+        uint8_t *q = p ? realloc(B->rval, (size_t)c) : NULL;
+        if (p) B->rpos = p;
+        if (q) B->rval = q;
+        if (!p || !q) { B->on = 0; return -3; }
+        B->rcap = c;
+    }
+    for (; B->nr < nrare; B->nr++) {
+        B->rpos[B->nr] = (uint32_t)rare[B->nr];
+        B->rval[B->nr] = B->g8[rare[B->nr]];
+    }
+    return 0;
+}
+
+/**
+ * @brief rare_step1() on bytes (see RareBytes for when this is valid).
+ *
+ * Marks the common reachable values: 1-heap options with a common value, and
+ * G(a) ^ G(m - a) for every rare a; rare results never occur here.  Rare
+ * option values (rare 1-heap options, and the 0-heap option, whose value 0 is
+ * always rare) cannot be G(n) under the speculative assumption, so they are
+ * skipped.  The mark table is stamped with n, so it never needs clearing.  Returns the
+ * smallest unmarked common value, or UINT_MAX if all 256 common values below
+ * 512 are reachable (then the value does not fit and the caller uses
+ * rare_step1()).  Needs g8[0..n) and the rare bytes (rb_catch_up()).
+ *
+ * @param B     byte state
+ * @param R     rule
+ * @param G     nim-values (for the class of 1-heap options)
+ * @param n     heap size
+ * @param mask  rare-value mask
+ * @param st    statistics: scan1 is incremented
+ * @return G(n) under the speculative assumption, or UINT_MAX
+ */
+static unsigned rare_step1_bytes(RareBytes *B, const Rule *R, const uint16_t *G, long n, unsigned mask,
+                                 RareStats *st) {
+    uint32_t stamp = (uint32_t)n;
+    uint32_t *mark = B->mark;
+    const uint32_t *rpos = B->rpos;
+    const uint8_t *rval = B->rval;
+    long nr = B->nr;
+    for (int k = 0; k <= R->t; k++) {
+        unsigned d = R->d[k];
+        if (!d) continue;
+        long m = n - k;
+        if ((d & 2) && k > 0 && !rv_rare(G[m], mask)) mark[B->g8[m]] = stamp;
+        if (d & 4) {
+            const uint8_t *gm = B->g8 + m;   /* gm[-a] = byte(G(m - a)) */
+            for (long i = 0; i < nr; i++) mark[rval[i] ^ gm[-(long)rpos[i]]] = stamp;
+            st->scan1 += nr;
+        }
+    }
+    for (int i = 0; i < B->ncommon; i++)
+        if (mark[B->cbyte[i]] != stamp) return B->common[i];
+    return UINT_MAX;
+}
+
+/**
  * @brief Speculate G[n0..e): step 1 only (rare_step1()), assuming no new rare value.
  *
  * Sequential, since each value depends on the previous ones.  Speculative
- * values are always common, so the rare list does not change.
+ * values are always common, so the rare list does not change.  Where it is
+ * valid (see RareBytes), step 1 runs on bytes: rare_step1_bytes().
  *
  * @param S      scratch of the speculating thread (grown as values grow)
  * @param R      rule
@@ -866,17 +1039,31 @@ static long rare_chunk_end(long x, long end) {
  * @param nrare  length of @p rare
  * @param maxG   in/out: largest value so far
  * @param vcap   in/out: power of two above @p maxG
- * @param st     statistics: scan1 and speculated are incremented
+ * @param B      one-byte state (may be NULL)
+ * @param st     statistics: scan1, speculated and bytes are incremented
  * @param rc     out: set to the store_value() error (-2 or -3) if one occurs
  * @return the end of the speculated range: @p e, or the heap size where store_value() failed
  */
 static long rare_speculate(Scratch *S, const Rule *R, uint16_t *G, long n0, long e, unsigned mask,
-                           const long *rare, long nrare, unsigned *maxG, unsigned *vcap, RareStats *st,
-                           int *rc) {
+                           const long *rare, long nrare, unsigned *maxG, unsigned *vcap, RareBytes *B,
+                           RareStats *st, int *rc) {
+    /* heap sizes from which no partner b = m - a of step 1 can be rare */
+    long bytes_from = (nrare ? 2 * rare[nrare - 1] : 0) + R->t + 1;
+    if (B && B->on && rb_catch_up(B, G, n0, rare, nrare)) B = NULL;
     long n = n0;
     for (; n < e; n++) {
-        int r = store_value(S, G, n, rare_step1(S, R, G, n, mask, rare, nrare, st), maxG, vcap);
+        unsigned g = UINT_MAX;
+        if (B && B->on && n >= bytes_from) {
+            g = rare_step1_bytes(B, R, G, n, mask, st);
+            if (g != UINT_MAX) st->bytes++;
+        }
+        if (g == UINT_MAX) g = rare_step1(S, R, G, n, mask, rare, nrare, st);
+        int r = store_value(S, G, n, g, maxG, vcap);
         if (r) { *rc = r; break; }
+        if (B && B->on) {
+            if (g >= 512) B->on = 0;
+            else { B->g8[n] = (uint8_t)rb_byte(g, B->drop); B->known = n + 1; }
+        }
     }
     st->speculated += n - n0;
     return n;
@@ -1001,13 +1188,14 @@ static int rare_append(long **rare, long *nrare, long *cap, long n) {
  * @param vcap   in/out: power of two above @p maxG
  * @param nt     number of threads (at least 2 to overlap anything; with one,
  *               thread 0 speculates B and then checks A alone)
+ * @param B      one-byte state for the speculation (may be NULL)
  * @param st     statistics, updated
  * @return 0, -2 (value > 65535) or -3 (out of memory); G is correct below the
  *         heap size where it stopped
  */
 static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long end, unsigned mask,
                          long **rare, long *nrare, long *cap, unsigned *maxG, unsigned *vcap, int nt,
-                         RareStats *st) {
+                         RareBytes *B, RareStats *st) {
     long a0 = n, a1 = n;            /* chunk A = [a0, a1): speculated, not yet checked */
     unsigned maxA = *maxG, vcapA = *vcap;   /* maxG and vcap over G[0..a0) */
     while (a0 < end) {
@@ -1015,7 +1203,8 @@ static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long en
         if (a1 == a0) {             /* nothing pending: speculate A on its own */
             maxA = *maxG;
             vcapA = *vcap;
-            a1 = rare_speculate(S, R, G, a0, rare_chunk_end(a0, end), mask, *rare, *nrare, maxG, vcap, st, &rc);
+            a1 = rare_speculate(S, R, G, a0, rare_chunk_end(a0, end), mask, *rare, *nrare, maxG, vcap, B, st,
+                                &rc);
             if (a1 == a0) {         /* storing failed at a0 itself: compute it exactly */
                 unsigned g = grundy_rare(S, R, G, a0, mask, *rare, *nrare, st);
                 if ((rc = store_value(S, G, a0, g, maxG, vcap))) return rc;
@@ -1039,11 +1228,12 @@ static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long en
             tid = omp_get_thread_num();
 #endif
             if (tid == 0 && b1 > a1)
-                bend = rare_speculate(S, R, G, a1, b1, mask, *rare, *nrare, maxG, vcap, &specst, &rcB);
+                bend = rare_speculate(S, R, G, a1, b1, mask, *rare, *nrare, maxG, vcap, B, &specst, &rcB);
             rare_check_worker(R, G, a1, mask, *rare, *nrare, need, &cursor, &bad, &badval, &oom, st);
         }
         st->scan1 += specst.scan1;
         st->speculated += specst.speculated;
+        st->bytes += specst.bytes;
         if (oom) return -3;
         if (bad == a1) {            /* A is correct; B (if any) is the next chunk to check */
             a0 = a1;
@@ -1062,6 +1252,7 @@ static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long en
         if ((rc = store_value(S, G, bad, badval, maxG, vcap))) return rc;
         if (rv_rare(badval, mask) && (rc = rare_append(rare, nrare, cap, bad))) return rc;
         a0 = a1 = bad + 1;
+        if (B && B->known > bad) B->known = bad;   /* g8 from `bad` on is stale */
     }
     return 0;
 }
@@ -1080,7 +1271,8 @@ static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long en
  * With one thread it runs grundy_rare() for every heap size.  With more, from
  * RARE_SPEC_MIN on it uses speculation with overlapping check (rare_spec_run()):
  * step 1 on one thread, the full check of the previous chunk on the others at
- * the same time, in chunks of n/8 heap sizes (4096 .. 2^18).
+ * the same time, in chunks of n/8 heap sizes (4096 .. 2^18).  The speculation
+ * uses one byte per value where possible (RareBytes).
  *
  * @param R        rule
  * @param G        array of at least @p to entries; G[0..from) valid
@@ -1106,6 +1298,7 @@ static int extend_rare(const Rule *R, uint16_t *G, long from, long to, int threa
     long *rare = NULL, nrare = 0, cap = 0;
     unsigned mask = 0;
     int active = 0, rc = 0;
+    RareBytes B = {0};
     long next_check = 2048;
     while (next_check <= from) next_check *= 4;
     for (long n = from; n < to && !rc; n++) {
@@ -1118,6 +1311,7 @@ static int extend_rare(const Rule *R, uint16_t *G, long from, long to, int threa
                 mask = m;
                 nrare = rv_collect(G, n, mask, &rare, &cap);
                 if (nrare < 0) { rc = -3; break; }
+                if (nt > 1 && (rc = rb_setup(&B, R, mask, maxG, to))) break;
             }
             if (n == next_check) next_check *= 4;
         }
@@ -1126,7 +1320,7 @@ static int extend_rare(const Rule *R, uint16_t *G, long from, long to, int threa
              * where the loop re-chooses the mask */
             long end = to < next_check ? to : next_check;
             long long before = st->scan1 + st->scan2;
-            rc = rare_spec_run(&S, R, G, n, end, mask, &rare, &nrare, &cap, &maxG, &vcap, nt, st);
+            rc = rare_spec_run(&S, R, G, n, end, mask, &rare, &nrare, &cap, &maxG, &vcap, nt, &B, st);
             *pairs += st->scan1 + st->scan2 - before;
             n = end - 1;   /* the loop's n++ continues at end */
             continue;
@@ -1151,6 +1345,7 @@ static int extend_rare(const Rule *R, uint16_t *G, long from, long to, int threa
     st->mask = active ? mask : 0;
     st->nrare = active ? nrare : 0;
     free(rare);
+    rb_free(&B);
     scratch_free(&S);
     return rc;
 }
@@ -2573,8 +2768,9 @@ int main(int argc, char **argv) {
                         "+ %lld (witnesses), %lld full scans\n", res.rare.mask, res.rare.nrare,
                         res.rare.scan1, res.rare.scan2, res.rare.full);
             if (res.rare.speculated)
-                fprintf(g, "speculation     %lld values speculated, %lld chunks failed the check "
-                        "(a new rare value)\n", res.rare.speculated, res.rare.restarts);
+                fprintf(g, "speculation     %lld values speculated (%lld with one byte per value), %lld chunks "
+                        "failed the check (a new rare value)\n", res.rare.speculated, res.rare.bytes,
+                        res.rare.restarts);
         }
         else
             fprintf(g, "time            %.2f s (%s)\n", res.secs, res.sparse ? "sparse-space" : "brute force");

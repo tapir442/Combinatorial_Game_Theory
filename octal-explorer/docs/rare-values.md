@@ -64,7 +64,8 @@ values **are** reachable, which can stop early.
   each new rare heap size;
 - otherwise (the default: all cores) uses **speculation**, see below;
 - reports in `summary.txt` the mask, the number of rare heap sizes, the pairs examined in each
-  step, how often step 2 had to scan everything, and the speculation statistics.
+  step, how often step 2 had to scan everything, and the speculation statistics (values
+  speculated, how many with one byte per value, failed checks).
 
 ## Speculation (Grossman §3.1)
 
@@ -111,6 +112,43 @@ slow down the speculating thread on the same physical core (18.6 s instead of 14
 to 10⁷).  The default (spin briefly, then sleep) is fine; `OMP_WAIT_POLICY=passive` is slightly
 faster (14.0 s).
 
+## One byte per value (Grossman §3.2)
+
+All Officers values are below 512.  Fix a bit \(j\) of the mask below 512 (the highest one) and
+delete it from every value:
+\(\operatorname{byte}(v) = (v \mathbin{\&} (2^j - 1)) \mid ((v \gg (j+1)) \ll j)\).  This map is
+linear under XOR, and on the **common** values below 512 it is one-to-one onto 0..255, because
+for a common value the parity condition fixes bit \(j\).  (Grossman deletes bit 8 for the
+Officers mask `0x1ee`; that is the same rule.)
+
+So the speculation keeps a byte copy `g8` of the values, a 256-entry mark table, and the rare
+heap sizes with the bytes of their values (`RareBytes`, `rare_step1_bytes`).  Step 1 then reads
+half as much memory: the last ~20,000 values it needs fit in the 32 KB L1 cache instead of
+taking 40 KB.
+
+On bytes, step 1 is only correct if every marked value is common, otherwise a rare and a common
+value could share a byte.  A marked value \(G(a) \oplus G(m-a)\) with \(a\) rare is common unless
+\(m - a\) is rare too, which cannot happen once \(n > 2 \cdot{}\)(largest rare heap size)\({} + t\),
+for `.6` from \(n = 41{,}256\) on.  Before that, for codes with 3-heap moves, and as soon as a value
+reaches 512, the speculation uses the 16-bit step 1.  The speculative values are therefore the
+same either way, and the check still uses the full 16-bit algorithm.  A debug build that ran both
+versions of step 1 for every speculated heap size of `.6`, `grundy`, `couples` and `.77` up to
+2·10⁶ found no difference; for `.6` up to 10⁷, 99.9% of the speculated values used bytes.
+
+Effect, same machine (seconds, 24 threads, identical values):
+
+| code | n | 16-bit speculation | one byte per value |
+|---|---:|---:|---:|
+| `.6` | 10⁶ | 1.69 | 1.37 |
+| `.6` | 10⁷ | 14.2 | 10.4 |
+| `grundy` | 10⁷ | 11.8 | 8.9 |
+| `couples` | 10⁷ | 13.1 | 10.3 |
+
+The speculating thread for `.6` to 10⁷ now computes for 7.7 s instead of 13.0 s and waits for
+the check 2.0 s, so the check starts to matter again.
+
+## Failed stores
+
 If storing a speculative value fails (a value above 65535, or out of memory), the chunk ends
 there; when that heap size comes up again as the first of a chunk, it is computed exactly
 instead, so an error is only reported for a correct value.
@@ -152,28 +190,29 @@ all 24 threads.
 
 | code | n | brute | blocked | gpu (Vulkan) | rocm | rare -j 1 | **rare** |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `.6` | 10⁵ | 1.55 | 0.19 | 0.25 | 0.45 | 0.61 | 0.34 |
-| `.6` | 3·10⁵ | 13.1 | 1.01 | 1.93 | 2.14 | 1.83 | **0.62** |
-| `.6` | 10⁶ | – | 9.04 | 22.9 | 19.6 | 6.13 | **1.76** |
-| `.6` | 10⁷ | – | – | – | – | 61.1 | **14.0** |
-| `grundy` | 10⁶ | – | 9.13 | 22.3 | 19.3 | 5.36 | **1.46** |
-| `grundy` | 10⁷ | – | – | – | – | 53.4 | **11.6** |
-| `couples` | 10⁶ | – | 9.90 | 22.7 | 19.5 | 5.68 | **1.63** |
-| `couples` | 10⁷ | – | – | – | – | 59.2 | **13.3** |
-| `.007` | 3·10⁵ | 13.5 | 1.34 | 2.11 | 2.26 | 13.4 | 13.2 (falls back to brute) |
-| `.007` | 10⁶ | – | 9.85 | 23.1 | 20.9 | – | – |
+| `.6` | 10⁵ | 1.46 | 0.12 | 0.30 | 0.53 | 0.61 | 0.27 |
+| `.6` | 3·10⁵ | 13.1 | 1.01 | 1.93 | 2.17 | 1.87 | **0.53** |
+| `.6` | 10⁶ | – | 9.92 | 22.5 | 20.5 | 6.35 | **1.35** |
+| `.6` | 10⁷ | – | – | – | – | 61.7 | **10.7** |
+| `grundy` | 10⁶ | – | 9.13 | 22.4 | 19.6 | 5.33 | **1.27** |
+| `grundy` | 10⁷ | – | – | – | – | 53.2 | **8.89** |
+| `couples` | 10⁶ | – | 9.51 | 23.0 | 19.3 | 5.67 | **1.31** |
+| `couples` | 10⁷ | – | – | – | – | 57.4 | **10.2** |
+| `.007` | 3·10⁵ | 13.1 | 0.97 | 2.00 | 2.19 | 13.4 | 13.1 (falls back to brute) |
+| `.007` | 10⁶ | – | 9.46 | 23.1 | 20.2 | – | – |
 
 The full table, with all sizes, is in `benchmarks/results/methods.md`.
 
 - For the three sparse games the plain rare-value algorithm runs at an almost constant
   **≈ 170,000 values per second** on one core (10⁶ → 10⁷ takes 10× as long, not 100×).  Grossman
   reports 88,000 values/s for the same algorithm on a 2008 Xeon.
-- **Speculation** with overlapping check makes it 4.4–4.6× faster again: **≈ 710,000–860,000
-  values per second**.  Grossman's speculation gave 2.2× (196,000 values/s); here the check
-  also runs on all cores, at the same time as the speculation.
-- At \(n = 10^6\), `rare` is 5–6.3× faster than `blocked` on all 24 threads, and about 80× faster
+- **Speculation** with overlapping check and one byte per value makes it 5.6–6.0× faster
+  again: **≈ 930,000–1,120,000 values per second**.  Grossman's speculation gave 2.2× (196,000
+  values/s) and one byte per value 321,000 values/s; here the check also runs on all cores, at
+  the same time as the speculation.
+- At \(n = 10^6\), `rare` is 7.2–7.4× faster than `blocked` on all 24 threads, and about 80× faster
   than brute force (143 s for `.6`).  At \(10^7\) the O(n²) methods would need roughly 100× their
-  10⁶ time (about 1000 s for `blocked`), so `rare` is then about 60× faster than `blocked`, and
+  10⁶ time (about 1000 s for `blocked`), so `rare` is then about 90× faster than `blocked`, and
   the gap keeps growing with \(n\).
 - Below about 2·10⁵, `blocked` is faster: `rare` uses brute force on one core until its mask is
   chosen at n = 32768.
@@ -184,10 +223,9 @@ The full table, with all sizes, is in `benchmarks/results/methods.md`.
 
 ## Not implemented yet (Grossman §3)
 
-Grossman's further speed-ups, about 60× in total together with speculation and overlap:
+Grossman's further speed-ups, about 60× in total together with speculation, overlap and one
+byte per value:
 
-- **One byte per value.**  All Officers values are below 512, and for a common value bit 8
-  follows from the others, so values fit in a byte and the mark array has 256 entries.
 - **Generated, fully unrolled code** for step 1 and for the mex search: the rare heap sizes
   and their values are constants, about three instructions per rare heap.
 - **Baton passing.**  Thread \(j\) computes the \(n \equiv j \pmod{m}\), marks everything that

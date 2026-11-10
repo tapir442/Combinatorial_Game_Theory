@@ -97,7 +97,7 @@ values of `.007` take 5.6 s against 73 s.  See `docs/benchmark.md` and
 
 - Brute force and the blocked method are O(n) per heap size (O(N²) total).  10⁶ values
   take about 143 s with `--brute` and 10 s with `--blocked` on 24 threads.  `--rare` takes
-  1.8 s for 10⁶ and 14 s for 10⁷ values of `.6` (6 s and 61 s with `-j 1`), but gives no
+  1.4 s for 10⁶ and 11 s for 10⁷ values of `.6` (6 s and 62 s with `-j 1`), but gives no
   speed-up for `.007`.
 - `--sparse` (CLI only) is an older rare/common-value variant with the opposite convention.
   It is checked against brute force but is not faster; `--rare` replaces it.
