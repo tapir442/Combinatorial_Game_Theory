@@ -47,13 +47,19 @@ typedef enum {
 } Method;
 
 /** Short name of each Method, as used in messages and summary.txt. */
+/** Rare-value mask flags (see rv_rare() in octal.c): a position mask, whose rare
+ *  class alternates with the heap size n: parity(G(n) & mask) == (n + par) mod 2. */
+#define RV_POS (1u << 31)   /**< position mask */
+#define RV_PAR (1u << 30)   /**< position mask with par = 1 */
+#define RV_MASK 0xffffu     /**< the bits of the mask proper */
+
 /** Names of the methods, indexed by Method (as in the command-line options). */
 OCTAL_INTERNAL extern const char *const method_name[];
 
 /** @brief Statistics of the rare-value method (for summary.txt and the benchmark). */
 typedef struct {
     int active;               /**< the rare-value method was in use at the end */
-    unsigned mask;            /**< mask (valid if active) */
+    unsigned mask;            /**< mask (valid if active); RV_POS / RV_PAR for a position mask */
     long nrare;               /**< rare heap sizes (valid if active) */
     long long scan1, scan2;   /**< pairs examined in step 1 (rare heaps) and step 2 (witnesses) */
     long long full;           /**< heap sizes where step 2 ran to the end (a new rare value) */

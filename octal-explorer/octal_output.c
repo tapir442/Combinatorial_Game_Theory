@@ -515,6 +515,16 @@ static void write_html(const char *dir, const Rule *R, const Result *res, const 
 
 /* ---------------------------------------------------- command-line program */
 
+/** Describe a rare-value mask: "mask 0x1ee", or "position mask 0xd (n odd)" (see RV_POS). */
+static const char *rare_mask_text(unsigned mask, char *buf, size_t len) {
+    if (mask & RV_POS)
+        snprintf(buf, len, "position mask 0x%x (rare: parity of G(n) & mask = parity of n%s)", mask & RV_MASK,
+                 mask & RV_PAR ? " + 1" : "");
+    else
+        snprintf(buf, len, "mask 0x%x", mask);
+    return buf;
+}
+
 /** Print command-line help to stderr and exit with status 2. */
 static void usage(void) {
     fprintf(stderr,
@@ -550,6 +560,7 @@ static void usage(void) {
  * values.csv, the PNG plots, index.html and summary.txt.  See usage().
  */
 int main(int argc, char **argv) {
+    char mtext[120];                /* rare_mask_text() */
     long N = 10000, embed = 200000;
     int W = 0, L = 1000, check = 0, print = 0, threads = 0;
     Method method = METHOD_BLOCKED;
@@ -602,9 +613,10 @@ int main(int argc, char **argv) {
             printf("check OK: %s, n < %ld, sparse %.2f s (%s), brute %.2f s\n", R.code, N, res.secs,
                    res.sparse ? "active" : "inactive", b.secs);
         else if (method == METHOD_RARE)
-            printf("check OK: %s, n < %ld, rare %.2f s (%s, mask 0x%x, %ld rare heaps, %d threads, "
+            printf("check OK: %s, n < %ld, rare %.2f s (%s, %s, %ld rare heaps, %d threads, "
                    "%lld restarts), brute %.2f s\n", R.code, N, res.secs,
-                   res.rare.active ? "active" : "inactive", res.rare.mask, res.rare.nrare, res.rare.threads,
+                   res.rare.active ? "active" : "inactive", rare_mask_text(res.rare.mask, mtext, sizeof mtext),
+                   res.rare.nrare, res.rare.threads,
                    res.rare.restarts, b.secs);
         else
             printf("check OK: %s, n < %ld, %s %.2f s, brute %.2f s\n", R.code, N, m, res.secs, b.secs);
@@ -681,8 +693,9 @@ int main(int argc, char **argv) {
             fprintf(g, "time            %.2f s (rare-value algorithm, %s, %d threads)\n", res.secs,
                     res.rare.active ? "active" : "inactive: no mask with few rare values", res.rare.threads);
             if (res.rare.active)
-                fprintf(g, "rare values     mask 0x%x, %ld rare heap sizes; pairs examined %lld (rare heaps) "
-                        "+ %lld (witnesses), %lld full scans\n", res.rare.mask, res.rare.nrare,
+                fprintf(g, "rare values     %s, %ld rare heap sizes; pairs examined %lld (rare heaps) "
+                        "+ %lld (witnesses), %lld full scans\n", rare_mask_text(res.rare.mask, mtext, sizeof mtext),
+                        res.rare.nrare,
                         res.rare.scan1, res.rare.scan2, res.rare.full);
             if (res.rare.speculated)
                 fprintf(g, "speculation     %lld values speculated (%lld with one byte per value) by a team of %d "

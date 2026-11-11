@@ -591,39 +591,77 @@ static int extend_blocked(const Rule *R, uint16_t *G, long from, long to, int th
 /* ------------------------------------- rare-value algorithm (Grossman 2017) */
 
 /**
- * Rare-value algorithm: value @p v is *rare* iff popcount(v & mask) is EVEN.
+ * Rare-value algorithm: for heap size @p n, value @p v is *rare* iff
+ * popcount(v & m) has the parity p(n), where m = mask & RV_MASK and
  *
- * This is the convention of Winning Ways and of Grossman, "Searching for
- * periodicity in Officers" (Games of No Chance 5, 2017).  The rare values form
- * a group under XOR (0 is always rare) and the common values its other coset:
- * rare^rare = rare, rare^common = common, common^common = rare.  (The older
- * sparse mode above uses the opposite convention, see grundy_sparse().)
+ * - p(n) = 0 for a **value mask** (RV_POS clear): v is rare iff popcount(v & m)
+ *   is EVEN.  This is the convention of Winning Ways and of Grossman, "Searching
+ *   for periodicity in Officers" (Games of No Chance 5, 2017).  The rare values
+ *   form a group under XOR (0 is always rare) and the common values its other
+ *   coset: rare^rare = rare, rare^common = common, common^common = rare.  (The
+ *   older sparse mode above uses the opposite convention, see grundy_sparse().)
+ * - p(n) = (n + par) mod 2 for a **position mask** (RV_POS set, par = 1 iff
+ *   RV_PAR is set): Flammenkamp's sparse positions, e.g. for .106 with m = 0xd
+ *   and par = t = 3.  It requires that every two-heap move removes a number k
+ *   of beans of the parity par (see rv_pos_parity()): then a + b = n - k for
+ *   every pair, p(a) ^ p(b) = (a + b) mod 2 = p(n), and the XOR of two heaps
+ *   that are not rare is again rare *for n*, as with a value mask.
+ *
+ * A heap size x is *rare* iff G(x) is rare for x.  Everything in the algorithm
+ * (steps 1 and 2, the speculation, the check) only uses these two facts, so it
+ * works for both kinds of mask; only the class of a value now depends on the
+ * heap size it is a value or an option of.
  */
-static inline int rv_rare(unsigned v, unsigned mask) {
-    return !__builtin_parity(v & mask);
+/* RV_POS, RV_PAR, RV_MASK: see octal_internal.h */
+static inline int rv_rare(unsigned v, unsigned mask, long n) {
+    unsigned p = (mask >> 31) & ((unsigned)n + (mask >> 30)) & 1u;
+    return (unsigned)__builtin_parity(v & mask & RV_MASK) == p;
+}
+
+/** Parity of the number of beans removed by every two-heap move, or -1 if they
+ *  differ or there are three-heap moves (then position masks do not apply). */
+static int rv_pos_parity(const Rule *R) {
+    if (R->hex) return -1;
+    int par = -1;
+    for (int k = 0; k <= R->t; k++)
+        if (R->d[k] & 4) {
+            if (par >= 0 && par != (k & 1)) return -1;
+            par = k & 1;
+        }
+    return par;
 }
 
 /**
  * @brief Choose the rare-value mask: the one that makes the fewest heap sizes rare.
  *
- * Tries every mask 1 .. vcap-1 against the value histogram of G[1..n).
+ * Tries every value mask 1 .. vcap-1 and, where the rule allows them
+ * (rv_pos_parity()), every position mask against the histogram of G[1..n)
+ * by value and parity of the heap size.  Ties go to the value mask.
  *
+ * @param R           rule
  * @param G           nim-values
  * @param n           number of values to consider
  * @param vcap        power of two above the largest value
  * @param rare_count  out: number of rare heap sizes in 1 .. n-1 for the chosen mask
- * @return the chosen mask
+ * @return the chosen mask, with RV_POS / RV_PAR for a position mask
  */
-static unsigned rv_choose_mask(const uint16_t *G, long n, unsigned vcap, long *rare_count) {
-    long *cnt = xcalloc(vcap, sizeof *cnt);
-    for (long i = 1; i < n; i++) cnt[G[i]]++;
+static unsigned rv_choose_mask(const Rule *R, const uint16_t *G, long n, unsigned vcap, long *rare_count) {
+    long *cnt = xcalloc(2 * (size_t)vcap, sizeof *cnt);   /* cnt[(i & 1) * vcap + G[i]] */
+    for (long i = 1; i < n; i++) cnt[(i & 1) * vcap + G[i]]++;
+    int par = rv_pos_parity(R);
     unsigned best = 1;
     long bestc = -1;
-    for (unsigned m = 1; m < vcap; m++) {
-        long c = 0;
-        for (unsigned v = 0; v < vcap; v++)
-            if (cnt[v] && rv_rare(v, m)) c += cnt[v];
-        if (bestc < 0 || c < bestc) { bestc = c; best = m; }
+    for (int kind = 0; kind < (par >= 0 ? 2 : 1); kind++) {
+        unsigned flags = kind ? RV_POS | (par ? RV_PAR : 0u) : 0u;
+        for (unsigned m = 1; m < vcap; m++) {
+            unsigned mk = m | flags;
+            long c = 0;
+            for (unsigned v = 0; v < vcap; v++) {
+                if (cnt[v] && rv_rare(v, mk, 0)) c += cnt[v];
+                if (cnt[vcap + v] && rv_rare(v, mk, 1)) c += cnt[vcap + v];
+            }
+            if (bestc < 0 || c < bestc) { bestc = c; best = mk; }
+        }
     }
     free(cnt);
     *rare_count = bestc < 0 ? 0 : bestc;
@@ -689,7 +727,7 @@ static unsigned rare_step1(Scratch *S, const Rule *R, const uint16_t *G, long n,
     /* smallest common value not marked; it exists below 2 * vcap, because no
      * option value reaches vcap and [vcap, 2 vcap) contains common values */
     unsigned cval = 0;
-    while (seen[cval] == stamp || rv_rare(cval, mask)) cval++;
+    while (seen[cval] == stamp || rv_rare(cval, mask, n)) cval++;
     return cval;
 }
 
@@ -762,7 +800,7 @@ static unsigned rare_step2(Scratch *S, const Rule *R, const uint16_t *G, long n,
      * values), so G(n) < cval can only be an unmarked rare value */
     long need = 0;                      /* unmarked rare values below cval */
     for (unsigned v = 0; v < cval; v++)
-        if (rv_rare(v, mask) && seen[v] != stamp) need++;
+        if (rv_rare(v, mask, n) && seen[v] != stamp) need++;
     if (!need) return cval;
     /* 2. find a witness pair for every rare value below cval */
 #ifdef RARE_SIMD
@@ -781,7 +819,7 @@ static unsigned rare_step2(Scratch *S, const Rule *R, const uint16_t *G, long n,
                 if (nw < 0) {
                     nw = 0;
                     for (unsigned v = 0; v < cval; v++)
-                        if (rv_rare(v, mask) && seen[v] != stamp) {
+                        if (rv_rare(v, mask, n) && seen[v] != stamp) {
                             want[nw] = (uint16_t)v;
                             wv[nw] = (v16u16){0} + want[nw];
                             nw++;
@@ -843,7 +881,7 @@ static unsigned rare_step2(Scratch *S, const Rule *R, const uint16_t *G, long n,
 static long rv_collect(const uint16_t *G, long n, unsigned mask, long **rare, long *cap) {
     long nr = 0;
     for (long i = 1; i < n; i++)
-        if (rv_rare(G[i], mask)) {
+        if (rv_rare(G[i], mask, i)) {
             if (nr == *cap) {
                 long c = *cap ? 2 * *cap : 1024;
                 long *p = realloc(*rare, (size_t)c * sizeof *p);
@@ -954,7 +992,9 @@ static void rb_free(RareBytes *B) {
  */
 static int rb_setup(RareBytes *B, const Rule *R, unsigned mask, unsigned maxG, long to) {
     unsigned low = mask & 0x1ff;
-    B->on = !R->hex && maxG < 512 && low != 0;
+    /* position masks: the common class alternates with n; not done on bytes
+     * (they have few rare heap sizes anyway, so step 1 is short) */
+    B->on = !R->hex && !(mask & RV_POS) && maxG < 512 && low != 0;
     B->known = 0;
     B->nr = 0;
     B->jit = NULL;
@@ -969,7 +1009,7 @@ static int rb_setup(RareBytes *B, const Rule *R, unsigned mask, unsigned maxG, l
     }
     B->ncommon = 0;
     for (unsigned v = 0; v < 512; v++)
-        if (!rv_rare(v, mask)) {
+        if (!rv_rare(v, mask, 0)) {   /* value masks only (byte mode) */
             B->common[B->ncommon] = (uint16_t)v;
             B->cbyte[B->ncommon++] = (uint8_t)rb_byte(v, B->drop);
         }
@@ -1112,7 +1152,7 @@ static unsigned rare_step1_bytes(const RareBytes *B, uint32_t *mark, const Rule 
         unsigned d = R->d[k];
         if (!d) continue;
         long m = n - k;
-        if ((d & 2) && k > 0 && !rv_rare(G[m], mask)) mark[B->g8[m]] = stamp;
+        if ((d & 2) && k > 0 && !rv_rare(G[m], mask, n)) mark[B->g8[m]] = stamp;
         if (d & 4) {
             const uint8_t *gm = B->g8 + m;   /* gm[-a] = byte(G(m - a)) */
             if (B->jit && B->jit_nr == nr) {
@@ -1162,7 +1202,7 @@ static unsigned grundy_rare_bytes(Scratch *S, const RareBytes *B, uint32_t *mark
     mark_simple(S, R, G, n, stamp);
     uint32_t *seen = S->seen;
     for (unsigned v = 0; v < cval; v++)
-        if (!rv_rare(v, mask)) seen[v] = stamp;
+        if (!rv_rare(v, mask, n)) seen[v] = stamp;
     return rare_step2(S, R, G, n, mask, cval, st);
 }
 
@@ -1306,7 +1346,7 @@ static void rare_baton_worker(RareBytes *B, const Rule *R, uint16_t *G, long n0,
             unsigned d = R->d[k];
             if (!d) continue;
             long m = n - k;
-            if ((d & 2) && k >= P && !rv_rare(G[m], mask)) mark[g8[m]] = stamp;
+            if ((d & 2) && k >= P && !rv_rare(G[m], mask, n)) mark[g8[m]] = stamp;
             if (d & 4) {
                 const uint8_t *gm = g8 + m;
                 if (jit) {                  /* split[k] <= jit_from, since P <= RARE_JIT_SKIP */
@@ -1329,7 +1369,7 @@ static void rare_baton_worker(RareBytes *B, const Rule *R, uint16_t *G, long n0,
             unsigned d = R->d[k];
             if (!d) continue;
             long m = n - k;
-            if ((d & 2) && k > 0 && k < P && !rv_rare(G[m], mask)) mark[g8[m]] = stamp;
+            if ((d & 2) && k > 0 && k < P && !rv_rare(G[m], mask, n)) mark[g8[m]] = stamp;
             if (d & 4) {
                 const uint8_t *gm = g8 + m;
                 for (long i = 0; i < split[k]; i++) mark[rval[i] ^ gm[-(long)rpos[i]]] = stamp;
@@ -1572,7 +1612,7 @@ static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long en
             if (a1 == a0) {         /* storing failed at a0 itself: compute it exactly */
                 unsigned g = grundy_rare(S, R, G, a0, mask, *rare, *nrare, st);
                 if ((rc = store_value(S, G, a0, g, maxG, vcap))) return rc;
-                if (rv_rare(g, mask) && (rc = rare_append(rare, nrare, cap, a0))) return rc;
+                if (rv_rare(g, mask, a0) && (rc = rare_append(rare, nrare, cap, a0))) return rc;
                 a1 = ++a0;
                 continue;
             }
@@ -1626,7 +1666,7 @@ static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long en
             if (G[i] > *maxG) *maxG = G[i];
         while (*vcap <= *maxG) *vcap *= 2;
         if ((rc = store_value(S, G, bad, badval, maxG, vcap))) return rc;
-        if (rv_rare(badval, mask) && (rc = rare_append(rare, nrare, cap, bad))) return rc;
+        if (rv_rare(badval, mask, bad) && (rc = rare_append(rare, nrare, cap, bad))) return rc;
         a0 = a1 = bad + 1;
         if (B && B->known > bad) B->known = bad;   /* g8 from `bad` on is stale */
     }
@@ -1707,7 +1747,7 @@ static int extend_rare(const Rule *R, uint16_t *G, long from, long to, int threa
         /* (re)choose the mask at the checkpoints, and when starting late */
         if ((n == from && n >= 2048) || n == next_check) {
             long rcnt;
-            unsigned m = rv_choose_mask(G, n, vcap, &rcnt);
+            unsigned m = rv_choose_mask(R, G, n, vcap, &rcnt);
             active = rcnt <= RARE_MAX_FRACTION * n;
             if (active) {
                 mask = m;
@@ -1739,7 +1779,7 @@ static int extend_rare(const Rule *R, uint16_t *G, long from, long to, int threa
         if (active) *pairs += st->scan1 + st->scan2 - before;
         rc = store_value(&S, G, n, g, &maxG, &vcap);
         if (progress && (n & 65535) == 65535) progress(n + 1, pctx);
-        if (!rc && active && n >= 1 && rv_rare(g, mask)) {
+        if (!rc && active && n >= 1 && rv_rare(g, mask, n)) {
             if (nrare == cap) {
                 long c = cap ? 2 * cap : 1024;
                 long *p = realloc(rare, (size_t)c * sizeof *p);

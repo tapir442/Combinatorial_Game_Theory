@@ -304,7 +304,7 @@ So the rare-value algorithm does **not** help Treblecross: about 10% of its heap
 rare under the best mask, and new ones keep appearing.  Flammenkamp's computation of `.007`
 to 2²⁵ must rely on something else.
 
-## Sparse positions (Flammenkamp; `.106`) — planned
+## Sparse positions (Flammenkamp; `.106`)
 
 Some games have a sparse **position** space instead of a sparse value space (type 1 in
 [Flammenkamp's table](https://wwwhomes.uni-bielefeld.de/achim/octal.html); definition on his
@@ -322,18 +322,44 @@ depending on the parity of \(n\).
 a game.  Our values up to 10⁶ confirm his table: with \(m = 13\) (`0xd`) and \(t = 3\) there are
 exactly **15 sparse positions** (3, 7, 10, 26, 68, 84, 96, 101, 320, 345, 359, 473, 563, 993, 1103),
 the last at 1103.  Under every value mask about half of the heap sizes are rare, which is why
-`--rare` falls back to brute force for `.106` (154 s for 10⁶).
+`--rare` used to fall back to brute force for `.106` (154 s for 10⁶).
 
-Plan, not implemented yet:
+**Position masks (implemented).**  The rare class of a value now depends on the heap size it
+belongs to: for heap \(n\), \(v\) is rare iff \(\operatorname{popcount}(v \mathbin{\&} m)\) has
+parity \(p(n)\), with \(p(n) = 0\) for a value mask and \(p(n) = (n + t) \bmod 2\) for a position
+mask (`rv_rare`, flags `RV_POS`/`RV_PAR` in the mask).  Steps 1 and 2, the speculation and the
+check only rely on "two heaps that are not rare give a rare XOR", which holds for a position mask
+whenever every two-heap move removes a number of beans of the same parity (`rv_pos_parity`; no
+three-heap moves).  `rv_choose_mask` tries both kinds and takes the one with the fewest rare heap
+sizes.  The byte mode, generated code and baton passing are value-mask only; with 15 rare heap
+sizes step 1 is short anyway.  `summary.txt` reports e.g.
+`position mask 0xd (rare: parity of G(n) & mask = parity of n + 1), 15 rare heap sizes`.
 
-1. Let `--rare` choose between value masks and position masks (rare class
-   \(q(v) = (n - t) \bmod 2\)).  Step 1 would then cost 15 pairs per heap size for `.106`.
+Results for `.106` (identical to brute force up to 4·10⁵, and `-j 1` = `-j 24` up to 10⁷):
+
+| n | `-j 1` | 24 threads | brute force |
+|---:|---:|---:|---:|
+| 4·10⁵ | – | 0.02 s | 22.6 s |
+| 10⁶ | 0.07 s | 0.04 s | 154 s |
+| 10⁷ | 0.67 s | 0.43 s | – |
+| 10⁸ | 6.65 s | 4.06 s | – |
+
+That is 15 million values per second on one core and 25 million with speculation (the
+speculation itself is then the sequential limit).  Per heap size, step 1 examines 15 pairs and
+step 2 about 16; the deepest witness pair up to 10⁸ is \(a = 8{,}388\) (at \(n \approx 4.3\cdot
+10^7\)), consistent with Flammenkamp's depth of 15,343.  The largest value up to 10⁸ is 30.
+Other codes now use position masks too, e.g. `.26` and `.34`.
+
+Next:
+
+1. (done, see above)
 2. A sliding window: Flammenkamp (OEIS A071458) notes that the last 15,343 + 3 values and the
    15 sparse values suffice, instead of all 1.6·10¹² values (3.2 TB as 16-bit values).
 3. Verify the period without storing the sequence: by Flammenkamp's criterion it suffices to
    check \(G(i + p) = G(i)\) for \(t + \max(\text{last}, \text{depth}) = 15{,}346\) successive
-   values, i.e. compute to preperiod + period + 15,346 ≈ 7.9·10¹¹.  At about 10⁶ values per second
-   (an estimate, not measured) that is about 9 days on one machine.
+   values, i.e. compute to preperiod + period + 15,346 ≈ 7.9·10¹¹.  At the measured 15–25 million
+   values per second that is about 9–15 hours on this machine, if the sliding window does not
+   slow it down.
 
 ## Benchmark
 
