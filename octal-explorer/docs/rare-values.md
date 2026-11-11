@@ -275,29 +275,32 @@ all 24 threads.
 
 | code | n | brute | blocked | gpu (Vulkan) | rocm | rare -j 1 | **rare** |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `.6` | 10⁵ | 1.46 | 0.12 | 0.30 | 0.53 | 0.61 | 0.27 |
-| `.6` | 3·10⁵ | 13.1 | 1.01 | 1.93 | 2.17 | 1.87 | **0.53** |
-| `.6` | 10⁶ | – | 9.92 | 22.5 | 20.5 | 6.35 | **1.35** |
-| `.6` | 10⁷ | – | – | – | – | 61.7 | **10.7** |
-| `grundy` | 10⁶ | – | 9.13 | 22.4 | 19.6 | 5.33 | **1.27** |
-| `grundy` | 10⁷ | – | – | – | – | 53.2 | **8.89** |
-| `couples` | 10⁶ | – | 9.51 | 23.0 | 19.3 | 5.67 | **1.31** |
-| `couples` | 10⁷ | – | – | – | – | 57.4 | **10.2** |
-| `.007` | 3·10⁵ | 13.1 | 0.97 | 2.00 | 2.19 | 13.4 | 13.1 (falls back to brute) |
-| `.007` | 10⁶ | – | 9.46 | 23.1 | 20.2 | – | – |
+| `.6` | 10⁵ | 1.46 | 0.65¹ | 0.23 | 0.82 | 0.58 | 0.25 |
+| `.6` | 3·10⁵ | 12.8 | 1.14 | 1.91 | 2.16 | 1.80 | **0.38** |
+| `.6` | 10⁶ | – | 9.27 | 22.4 | 18.5 | 5.96 | **0.68** |
+| `.6` | 10⁷ | – | – | – | – | 60.0 | **5.42** |
+| `grundy` | 10⁶ | – | 8.98 | 22.2 | 21.1 | 5.16 | **0.74** |
+| `grundy` | 10⁷ | – | – | – | – | 52.4 | **5.36** |
+| `couples` | 10⁶ | – | 8.88 | 22.6 | 20.5 | 5.50 | **0.63** |
+| `couples` | 10⁷ | – | – | – | – | 57.6 | **4.81** |
+| `.007` | 3·10⁵ | 12.9 | 0.96 | 2.14 | 2.23 | 12.9 | 12.9 (falls back to brute) |
+| `.007` | 10⁶ | – | 9.31 | 22.9 | 21.7 | – | – |
+
+¹ The first run of the benchmark, still cold; alone it takes 0.14–0.20 s.
 
 The full table, with all sizes, is in `benchmarks/results/methods.md`.
 
 - For the three sparse games the plain rare-value algorithm runs at an almost constant
   **≈ 170,000 values per second** on one core (10⁶ → 10⁷ takes 10× as long, not 100×).  Grossman
   reports 88,000 values/s for the same algorithm on a 2008 Xeon.
-- **Speculation** with overlapping check and one byte per value makes it 5.6–6.0× faster
-  again: **≈ 930,000–1,120,000 values per second**.  Grossman's speculation gave 2.2× (196,000
-  values/s) and one byte per value 321,000 values/s; here the check also runs on all cores, at
-  the same time as the speculation.
-- At \(n = 10^6\), `rare` is 7.2–7.4× faster than `blocked` on all 24 threads, and about 80× faster
+- **Speculation** with overlapping check, one byte per value and baton passing makes it about
+  11–12× faster again: **≈ 1.8–2.1 million values per second** at 10⁷.  Grossman's speculation
+  gave 2.2× (196,000 values/s), one byte per value 321,000 values/s, and with unrolled code and
+  baton passing on 8 threads 5.2 million values/s (with the check on a separate cluster); here
+  the check runs on the same 24 threads, at the same time as the speculation.
+- At \(n = 10^6\), `rare` is 12–14× faster than `blocked` on all 24 threads, and about 200× faster
   than brute force (143 s for `.6`).  At \(10^7\) the O(n²) methods would need roughly 100× their
-  10⁶ time (about 1000 s for `blocked`), so `rare` is then about 90× faster than `blocked`, and
+  10⁶ time (about 1000 s for `blocked`), so `rare` is then about 190× faster than `blocked`, and
   the gap keeps growing with \(n\).
 - Below about 2·10⁵, `blocked` is faster: `rare` uses brute force on one core until its mask is
   chosen at n = 32768.
