@@ -173,7 +173,7 @@ baton stops the team and thread 0 continues the chunk alone with the 16-bit step
 
 The team is threads 0 .. P−1 of the same parallel region in which the others check the previous
 chunk; at most \(n_t - 1\) speculate, so at least one thread checks from the start.  The team
-size is 4 (at most half the threads); `OCTAL_BATON=P` overrides it (`1` = one thread, as
+size is 6 (at most half the threads; 4 before the cheaper check below); `OCTAL_BATON=P` overrides it (`1` = one thread, as
 before).  It is printed in `summary.txt`.
 
 **Pipeline drains.**  With the speculation that much faster, the restarts of the pipeline began
@@ -193,11 +193,44 @@ Effect for `.6` to 10⁷ (Ryzen 9 7900X, 24 threads, identical values; compute t
 Without baton passing, the old code took 9.88 s.  With \(P = 4\) the team spends about 3.2 s of
 the 4.9 s speculating; the regions in which it runs take 4.6 s, because the **check** of each
 chunk (the full algorithm, 16-bit, on the remaining 20 threads) now takes longer than the
-speculation.  So larger teams no longer help, and the next step is a cheaper check, not more
-speculation.  Thread binding (`OMP_PROC_BIND`, `OMP_PLACES`) changed little (5.6–6.4 s).
+speculation.  So larger teams did not help, and the next step was a cheaper check (below).
+Thread binding (`OMP_PROC_BIND`, `OMP_PLACES`) changed little (5.6–6.4 s).
+
+## A cheaper check
+
+The check recomputes every value with the full algorithm.  Two changes make it cheaper without
+giving up its independence from the speculation (it still recomputes each value from \(G\)
+alone, so it would also catch a mistake in the baton passing):
+
+- **Step 1 on bytes** (`grundy_rare_bytes`): where the byte mode applies, the check runs the
+  byte step 1 on its own 256-entry mark table, and then puts the common values below `cval`
+  (all reachable, by step 1) and the 0-, 1- and 3-heap options into the 16-bit table for
+  step 2.  In the byte range no step-1 pair has two rare heaps, so step 2 sees exactly the
+  same marks as before.  Alone this gained only about 6% (4.9 → 4.6 s for `.6` to 10⁷),
+  because per heap size step 1 examines about 1,580 pairs and step 2 about 2,740.
+- **Vectors in the tail of step 2** (`rare_step2`, `RARE_SIMD`): step 2 spends most of its
+  pairs on the last few missing rare values.  For `.6` up to 2·10⁶ it starts with 57 missing
+  values on average; fewer than 8 are left after 840 pairs, fewer than 4 after 1,240, and the
+  last one is found after 2,750 (`grundy`: 33 missing, ≤ 8 after 650 of 3,140).  So once at most
+  8 values are missing, step 2 takes 16 pairs \((a+i,\ m-a-i)\) at once (GCC vector extensions;
+  AVX2/AVX-512 with `-march=native`), XORs them, compares with each missing value, and only a
+  block with a hit is gone through pair by pair.  Same marks, same result, and the same pair
+  counts as the scalar loop (`-j 1` gives identical statistics).
+
+Effect (seconds; values identical, also against `-j 1`, at 2·10⁶ for 1, 8 and 24 threads):
+
+| | before | cheaper check, team 4 | team 6 |
+|---|---:|---:|---:|
+| `.6` 10⁷ | 4.96 | 3.5–4.1 | **3.13–3.18** |
+| `grundy` 10⁷ | 4.95 | 3.8–4.2 | **3.54–3.66** |
+| `couples` 10⁷ | 4.5–4.6 | 4.0–4.2 | **3.06–3.12** |
+| `.6` 2·10⁶, `-j 1` | 12.3 | 7.5 | – |
+
+The plain algorithm (`-j 1`) is 40% faster.  With the check cheaper, a larger team pays off
+again: 6 and 5 are best, 8 is no better.
 
 Grossman reached 5.2 million values per second with 8 threads (speculative mex), against about
-2 million here.  His check ran on a separate cluster; here the same 24 threads do both.
+3.2 million here.  His check ran on a separate cluster; here the same 24 threads do both.
 
 ## Failed stores
 
@@ -314,8 +347,9 @@ The full table, with all sizes, is in `benchmarks/results/methods.md`.
 - **Generated, fully unrolled code** for step 1 and for the mex search: the rare heap sizes
   and their values are constants, about three instructions per rare heap.
 
-Since baton passing, the parallel check is the bottleneck (see above).  Grossman checked the
-intervals on a cluster, separately from the speculation, so the paper does not cover this case.
+Speculation and check now take similar time on the 24 threads; the mask checkpoints at
+\(n = 4^k \cdot 2048\) still drain the pipeline.  Grossman checked the intervals on a cluster,
+separately from the speculation, so the paper does not cover this balance.
 
 Step 1 needs only the rare heap sizes and the last 20,628 values, not the whole sequence.  That
 is presumably what makes 2⁴⁷ values feasible; the paper does not discuss storage.

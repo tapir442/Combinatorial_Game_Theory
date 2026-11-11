@@ -707,9 +707,52 @@ static unsigned rare_step1(Scratch *S, const Rule *R, const uint16_t *G, long n,
  * @param st     statistics: scan1, scan2 and full are incremented
  * @return G(n)
  */
+static unsigned rare_step2(Scratch *S, const Rule *R, const uint16_t *G, long n, unsigned mask, unsigned cval,
+                           RareStats *st);
+
+/**
+ * Step 2 with vectors (GCC vector extensions; AVX2/AVX-512 with -march=native).
+ *
+ * Step 2 spends most of its pairs on the last few missing rare values: for .6,
+ * fewer than 8 are left after about 840 of 2750 pairs per heap size (grundy:
+ * 650 of 3140).  Once at most RARE_TAIL values are missing, rare_step2() takes
+ * 16 pairs at once and compares their XORs with each missing value; only a block
+ * with a hit is gone through pair by pair.  Same marks, same result, same pair
+ * counts as the scalar loop.
+ */
+#if defined(__GNUC__) && !defined(__clang__)
+#define RARE_SIMD 1
+typedef uint16_t v16u16 __attribute__((vector_size(32)));
+typedef int16_t v16s16 __attribute__((vector_size(32)));
+typedef uint64_t v4u64 __attribute__((vector_size(32)));
+#endif
+/** Step 2 switches to vectors once at most this many rare values are missing. */
+#define RARE_TAIL 8
+
 static unsigned grundy_rare(Scratch *S, const Rule *R, const uint16_t *G, long n, unsigned mask,
                             const long *rare, long nrare, RareStats *st) {
     unsigned cval = rare_step1(S, R, G, n, mask, rare, nrare, st);
+    return rare_step2(S, R, G, n, mask, cval, st);
+}
+
+/**
+ * @brief Step 2 of the rare-value algorithm: G(n), given `cval` and the marks of step 1.
+ *
+ * Needs, stamped with n in @p S, every common value below @p cval and all rare
+ * values that step 1 or the 0-, 1- and 3-heap options reach (rare_step1() leaves
+ * exactly that; grundy_rare_bytes() sets it up from the byte step 1).
+ *
+ * @param S      scratch with the marks (stamp n)
+ * @param R      rule
+ * @param G      nim-values of all heap sizes < n
+ * @param n      heap size
+ * @param mask   rare-value mask
+ * @param cval   smallest common value not reachable from n
+ * @param st     statistics: scan2 and full are incremented
+ * @return G(n)
+ */
+static unsigned rare_step2(Scratch *S, const Rule *R, const uint16_t *G, long n, unsigned mask, unsigned cval,
+                           RareStats *st) {
     uint32_t *seen = S->seen;
     uint32_t stamp = (uint32_t)n;
     int tmax = R->t < n ? R->t : (int)n;
@@ -720,10 +763,61 @@ static unsigned grundy_rare(Scratch *S, const Rule *R, const uint16_t *G, long n
         if (rv_rare(v, mask) && seen[v] != stamp) need++;
     if (!need) return cval;
     /* 2. find a witness pair for every rare value below cval */
+#ifdef RARE_SIMD
+    uint16_t want[RARE_TAIL];           /* the unmarked rare values below cval ... */
+    v16u16 wv[RARE_TAIL];               /* ... broadcast to vectors */
+    int nw = -1;                        /* entries of want; -1: not built yet */
+#endif
     for (int k = 0; k <= tmax; k++) {
         if (!(R->d[k] & 4)) continue;
         long m = n - k;
         for (long a = 1; 2 * a <= m; a++) {
+#ifdef RARE_SIMD
+            /* the tail: few values left, 16 pairs (a + i, m - a - i) at once;
+             * all have a + i < m - a - i, so pair_allowed() holds for n > 2 */
+            if (need <= RARE_TAIL && 2 * a + 32 <= m && n > 2) {
+                if (nw < 0) {
+                    nw = 0;
+                    for (unsigned v = 0; v < cval; v++)
+                        if (rv_rare(v, mask) && seen[v] != stamp) {
+                            want[nw] = (uint16_t)v;
+                            wv[nw] = (v16u16){0} + want[nw];
+                            nw++;
+                        }
+                }
+                v16u16 ga, gb;
+                memcpy(&ga, G + a, sizeof ga);
+                memcpy(&gb, G + m - a - 15, sizeof gb);
+                gb = __builtin_shuffle(gb, (v16u16){15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0});
+                v16u16 x = ga ^ gb;
+                v16s16 hit = x == wv[0];
+                for (int i = 1; i < nw; i++) hit |= x == wv[i];
+                v4u64 h = (v4u64)hit;
+                if (!(h[0] | h[1] | h[2] | h[3])) {
+                    st->scan2 += 16;
+                    a += 15;
+                    continue;
+                }
+                /* a witness among them: go through the 16 pairs one by one */
+                for (long e = a + 16; a < e; a++) {
+                    unsigned y = G[a] ^ G[m - a];
+                    st->scan2++;
+                    if (y < cval && seen[y] != stamp) {
+                        seen[y] = stamp;
+                        if (--need == 0) return cval;
+                        for (int i = 0; i < nw; i++)
+                            if (want[i] == y) {
+                                nw--;
+                                want[i] = want[nw];
+                                wv[i] = wv[nw];
+                                break;
+                            }
+                    }
+                }
+                a--;
+                continue;
+            }
+#endif
             long b = m - a;
             if (!pair_allowed(R, n, a, b)) continue;
             unsigned x = G[a] ^ G[b];
@@ -731,6 +825,9 @@ static unsigned grundy_rare(Scratch *S, const Rule *R, const uint16_t *G, long n
             if (x < cval && seen[x] != stamp) {
                 seen[x] = stamp;
                 if (--need == 0) return cval;
+#ifdef RARE_SIMD
+                nw = -1;                /* rebuild want when the tail starts */
+#endif
             }
         }
     }
@@ -907,7 +1004,9 @@ static int rb_catch_up(RareBytes *B, const uint16_t *G, long n, const long *rare
  * 512 are reachable (then the value does not fit and the caller uses
  * rare_step1()).  Needs g8[0..n) and the rare bytes (rb_catch_up()).
  *
- * @param B     byte state
+ * @param B     byte state (read only)
+ * @param mark  mark table of 256 entries, stamped with n (B->mark for the
+ *              speculating thread; each checking thread has its own)
  * @param R     rule
  * @param G     nim-values (for the class of 1-heap options)
  * @param n     heap size
@@ -915,10 +1014,9 @@ static int rb_catch_up(RareBytes *B, const uint16_t *G, long n, const long *rare
  * @param st    statistics: scan1 is incremented
  * @return G(n) under the speculative assumption, or UINT_MAX
  */
-static unsigned rare_step1_bytes(RareBytes *B, const Rule *R, const uint16_t *G, long n, unsigned mask,
-                                 RareStats *st) {
+static unsigned rare_step1_bytes(const RareBytes *B, uint32_t *mark, const Rule *R, const uint16_t *G, long n,
+                                 unsigned mask, RareStats *st) {
     uint32_t stamp = (uint32_t)n;
-    uint32_t *mark = B->mark;
     const uint32_t *rpos = B->rpos;
     const uint8_t *rval = B->rval;
     long nr = B->nr;
@@ -936,6 +1034,43 @@ static unsigned rare_step1_bytes(RareBytes *B, const Rule *R, const uint16_t *G,
     for (int i = 0; i < B->ncommon; i++)
         if (mark[B->cbyte[i]] != stamp) return B->common[i];
     return UINT_MAX;
+}
+
+/**
+ * @brief grundy_rare() with step 1 on bytes: the check of the speculation (exact).
+ *
+ * Step 1 with rare_step1_bytes() on the thread's own @p mark table, which
+ * gives `cval` as rare_step1() would (same conditions as for the speculation,
+ * see RareBytes).  The byte marks are all common, so step 2 sees in @p S:
+ * the common values below cval (all reachable, by step 1) and the 0-, 1- and
+ * 3-heap options (mark_simple()).  Rare values reached by a pair of two rare
+ * heaps are not marked here (rare_step1() marks them in passing); step 2 finds
+ * them in its scan, so the result is the same, at the cost of a few more pairs.
+ *
+ * Independent of the baton passing: it recomputes every value from G, g8 and
+ * the rare bytes alone.  The step 1 on bytes reads half the memory of
+ * rare_step1(), and it skips pair_allowed() and the bound test per pair.
+ *
+ * @param S     scratch of the checking thread (2 * vcap + 2 entries)
+ * @param B     byte state (read only; g8 valid below n, rare bytes complete)
+ * @param mark  the checking thread's byte mark table (256 entries)
+ * @param R     rule
+ * @param G     nim-values of all heap sizes < n
+ * @param n     heap size, at least the byte-mode limit (see rare_speculate())
+ * @param mask  rare-value mask
+ * @param st    statistics: scan1, scan2 and full are incremented
+ * @return G(n), or UINT_MAX if it does not fit in a byte (the caller then uses grundy_rare())
+ */
+static unsigned grundy_rare_bytes(Scratch *S, const RareBytes *B, uint32_t *mark, const Rule *R,
+                                  const uint16_t *G, long n, unsigned mask, RareStats *st) {
+    unsigned cval = rare_step1_bytes(B, mark, R, G, n, mask, st);
+    if (cval == UINT_MAX) return UINT_MAX;
+    uint32_t stamp = (uint32_t)n;
+    mark_simple(S, R, G, n, stamp);
+    uint32_t *seen = S->seen;
+    for (unsigned v = 0; v < cval; v++)
+        if (!rv_rare(v, mask)) seen[v] = stamp;
+    return rare_step2(S, R, G, n, mask, cval, st);
 }
 
 /**
@@ -970,7 +1105,7 @@ static long rare_speculate(Scratch *S, const Rule *R, uint16_t *G, long n0, long
     for (; n < e; n++) {
         unsigned g = UINT_MAX;
         if (B && B->on && n >= bytes_from) {
-            g = rare_step1_bytes(B, R, G, n, mask, st);
+            g = rare_step1_bytes(B, B->mark, R, G, n, mask, st);
             if (g != UINT_MAX) st->bytes++;
         }
         if (g == UINT_MAX) g = rare_step1(S, R, G, n, mask, rare, nrare, st);
@@ -1186,6 +1321,9 @@ static void rare_spec_prepare(Baton *T, const Rule *R, const uint16_t *G, long n
  * @param rare    rare heap sizes < n0
  * @param nrare   length of @p rare
  * @param need    size of the thread's own mark table (2 * vcap + 2)
+ * @param B       byte state for grundy_rare_bytes(), or NULL (16-bit check only);
+ *                must not change during the check
+ * @param bytes_from  first heap size where @p B may be used (byte-mode limit)
  * @param cursor  shared: next heap size to hand out (atomic)
  * @param bad     shared: smallest wrong heap size found so far (e if none)
  * @param badval  shared: the correct value G(*bad)
@@ -1193,10 +1331,12 @@ static void rare_spec_prepare(Baton *T, const Rule *R, const uint16_t *G, long n
  * @param st      shared statistics: scan1, scan2 and full are added (in a critical section)
  */
 static void rare_check_worker(const Rule *R, const uint16_t *G, long e, unsigned mask,
-                              const long *rare, long nrare, size_t need, long *cursor, long *bad,
-                              unsigned *badval, int *oom, RareStats *st) {
+                              const long *rare, long nrare, size_t need, const RareBytes *B, long bytes_from,
+                              long *cursor, long *bad, unsigned *badval, int *oom, RareStats *st) {
     Scratch T = {0};
     RareStats loc = {0};
+    uint32_t mark[256];
+    memset(mark, 0xff, sizeof mark);
     if (scratch_reserve(&T, need)) {
 #pragma omp atomic write
         *oom = 1;
@@ -1210,7 +1350,9 @@ static void rare_check_worker(const Rule *R, const uint16_t *G, long e, unsigned
             if (start >= e || start > b) break;
             long stop = start + 64 < e ? start + 64 : e;
             for (long n = start; n < stop && n <= b; n++) {
-                unsigned g = grundy_rare(&T, R, G, n, mask, rare, nrare, &loc);
+                unsigned g = B && n >= bytes_from ? grundy_rare_bytes(&T, B, mark, R, G, n, mask, &loc)
+                                                  : UINT_MAX;
+                if (g == UINT_MAX) g = grundy_rare(&T, R, G, n, mask, rare, nrare, &loc);
                 if (g != G[n]) {
 #pragma omp critical(octal_rare_bad)
                     if (n < *bad) { *bad = n; *badval = g; }
@@ -1274,8 +1416,9 @@ static int rare_append(long **rare, long *nrare, long *cap, long n) {
  * limit.  Idle checking threads must not spin on thread 0's physical core:
  * OMP_WAIT_POLICY=active costs about 25%, the default and "passive" are fine.
  * With baton passing (team of 4) and one call for the whole range, .6 to 10^7
- * takes 5.0 s; the team speculates about 3 s of it, so the check is now the
- * limit.
+ * took 5.0 s, limited by the check.  With the cheaper check (step 1 on bytes,
+ * grundy_rare_bytes(); vectors in the tail of step 2, RARE_SIMD) and a team of
+ * 6 it takes about 3.15 s.
  *
  * @param S      main scratch (used by thread 0)
  * @param R      rule
@@ -1344,6 +1487,12 @@ static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long en
         Baton T;
         /* the team: threads 0 .. T.P-1 (at most nt - 1, so that one thread checks from the start) */
         rare_spec_prepare(&T, R, G, a1, b1, *rare, *nrare, B, P < nt ? P : nt - 1);
+        /* the check of A runs step 1 on bytes where it can: g8 must cover A,
+         * and nothing in B may change during the region (the speculation only
+         * writes g8 from a1 on) */
+        if (B && B->on && B->known < a1) rb_catch_up(B, G, a1, *rare, *nrare);
+        const RareBytes *CB = B && B->on && B->known >= a1 && B->nr == *nrare ? B : NULL;
+        long bytes_from = (*nrare ? 2 * (*rare)[*nrare - 1] : 0) + R->t + 1;
 #pragma omp parallel num_threads(nt)
         {
             int tid = 0;
@@ -1352,7 +1501,8 @@ static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long en
 #endif
             if (tid < T.P && b1 > a1)
                 rare_speculate_chunk(S, R, G, a1, mask, *rare, *nrare, maxG, vcap, B, &T, tid, &specst);
-            rare_check_worker(R, G, a1, mask, *rare, *nrare, need, &cursor, &bad, &badval, &oom, st);
+            rare_check_worker(R, G, a1, mask, *rare, *nrare, need, CB, bytes_from, &cursor, &bad, &badval, &oom,
+                              st);
         }
         if (b1 > a1) bend = T.done;
         st->scan1 += specst.scan1;
@@ -1382,8 +1532,10 @@ static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long en
     return 0;
 }
 
-/** Default size of the speculation team (Baton), at most nt / 2.  Override: OCTAL_BATON=P. */
-#define RARE_BATON_DEFAULT 4
+/** Default size of the speculation team (Baton), at most nt / 2.  Override: OCTAL_BATON=P.
+ *  .6, grundy, couples to 10^7 on 24 threads: 6 and 5 are best (3.1-3.6 s), 4 is
+ *  0.2-0.6 s slower, 8 no better. */
+#define RARE_BATON_DEFAULT 6
 
 /** Size of the speculation team for @p nt threads: OCTAL_BATON or RARE_BATON_DEFAULT, 1 .. nt. */
 static int rare_baton_size(int nt) {
