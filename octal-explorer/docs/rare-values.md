@@ -232,6 +232,44 @@ again: 6 and 5 are best, 8 is no better.
 Grossman reached 5.2 million values per second with 8 threads (speculative mex), against about
 3.2 million here.  His check ran on a separate cluster; here the same 24 threads do both.
 
+## Generated step-1 code (Grossman §3.2)
+
+Step 1 on bytes marks \(\mathit{rval}_i \oplus g8[m - \mathit{rpos}_i]\) for every rare entry
+\(i\).  The rare list changes only when a new rare value appears, so Grossman generates code with
+the entries as constants.  Here `rb_jit_update` writes the x86-64 machine code directly (no
+compiler at run time), three instructions per rare entry:
+
+```
+movzx eax, byte [rdi - rpos]    ; g8[m - rpos]   (rdi = g8 + m)
+xor   eax, rval                 ; left out if rval = 0
+mov   [rsi + 4*rax], edx        ; mark[...] = n
+```
+
+into an anonymous mapping that is then made read-only and executable (`mprotect`).  It is
+regenerated between parallel regions whenever the rare list or the mask changed, and covers the
+entries with \(\mathit{rpos} \ge 16\), so the baton passing (team of at most 16) can still do
+the few smaller ones after the baton.  Other architectures, `OCTAL_JIT=0`, or a failed `mmap`
+fall back to the loop.  It is used by the speculation, the baton passing, the check, and now
+also by `-j 1` (which before used the 16-bit step 1 throughout).
+
+Microbenchmark (the 1,584 rare entries of `.6` at 10⁷): **0.19 ns per entry instead of 0.40**,
+about one cycle, as Grossman's "about three instructions per rare heap" suggests.
+
+Effect (seconds, identical values; `-j 1` also identical pair counts):
+
+| | loop | generated code |
+|---|---:|---:|
+| `.6` 10⁷ | 3.07–3.12 | **2.57–2.67** |
+| `grundy` 10⁷ | 3.51–3.62 | **3.13–3.18** |
+| `couples` 10⁷ | 2.97–2.98 | **2.39–2.57** |
+| `.6` 2·10⁶, `-j 1` | 7.5 (16-bit step 1) | **5.99** |
+| `grundy` 2·10⁶, `-j 1` | – | 4.68 |
+
+Team sizes 4–6 are now equal within noise (`.6`: 2.49, 2.39, 2.51 s; 8 is slower), so the
+default stays 6.  The whole run is now limited by CPU work rather than baton latency: with 6
+team threads and a single checking thread, the team speculates `.6` at 0.17 µs per value, but
+at 0.25 µs when the checking threads share its cores.
+
 ## Failed stores
 
 If storing a speculative value fails (a value above 65535, or out of memory), the chunk ends
@@ -308,32 +346,33 @@ all 24 threads.
 
 | code | n | brute | blocked | gpu (Vulkan) | rocm | rare -j 1 | **rare** |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `.6` | 10⁵ | 1.47 | 0.16 | 0.22 | 0.42 | 0.41 | 0.20 |
-| `.6` | 3·10⁵ | 12.9 | 0.84 | 1.91 | 2.13 | 1.13 | **0.33** |
-| `.6` | 10⁶ | – | 8.97 | 22.2 | 18.7 | 3.68 | **0.56** |
-| `.6` | 10⁷ | – | – | – | – | 36.1 | **3.57** |
-| `grundy` | 10⁶ | – | 8.96 | 22.2 | 19.6 | 2.87 | **0.64** |
-| `grundy` | 10⁷ | – | – | – | – | 29.3 | **4.06** |
-| `couples` | 10⁶ | – | 9.18 | 22.4 | 19.0 | 3.49 | **0.49** |
-| `couples` | 10⁷ | – | – | – | – | 34.7 | **3.49** |
-| `.007` | 3·10⁵ | 12.9 | 0.94 | 1.99 | 2.16 | 12.8 | 12.8 (falls back to brute) |
-| `.007` | 10⁶ | – | 9.44 | 22.8 | 20.2 | – | – |
+| `.6` | 10⁵ | 1.46 | 0.18 | 0.24 | 0.55 | 0.37 | 0.23 |
+| `.6` | 3·10⁵ | 13.2 | 0.96 | 1.97 | 2.16 | 1.00 | **0.29** |
+| `.6` | 10⁶ | – | 9.29 | 22.4 | 18.9 | 3.06 | **0.70** |
+| `.6` | 10⁷ | – | – | – | – | 29.5 | **2.93** |
+| `grundy` | 10⁶ | – | 8.82 | 22.2 | 19.4 | 2.47 | **0.65** |
+| `grundy` | 10⁷ | – | – | – | – | 23.8 | **3.69** |
+| `couples` | 10⁶ | – | 9.12 | 22.4 | 19.0 | 2.89 | **0.49** |
+| `couples` | 10⁷ | – | – | – | – | 28.4 | **2.85** |
+| `.007` | 3·10⁵ | 12.9 | 0.99 | 1.99 | 2.16 | 12.9 | 12.9 (falls back to brute) |
+| `.007` | 10⁶ | – | 9.32 | 22.9 | 18.9 | – | – |
 
-The full table, with all sizes, is in `benchmarks/results/methods.md`.
+Below a second the `rare` times vary by about ±0.1 s from run to run (`.6` at 10⁶: 0.48–0.66 s
+in repeated runs, with and without the generated code).  The full table, with all sizes, is in `benchmarks/results/methods.md`.
 
 - For the three sparse games the plain rare-value algorithm runs at an almost constant
-  **≈ 280,000–340,000 values per second** on one core (10⁶ → 10⁷ takes 10× as long, not 100×;
-  170,000 before the vector tail of step 2).  Grossman reports 88,000 values/s for the same
+  **≈ 340,000–420,000 values per second** on one core (10⁶ → 10⁷ takes 10× as long, not 100×;
+  170,000 before the vector tail of step 2 and the generated step-1 code).  Grossman reports 88,000 values/s for the same
   algorithm on a 2008 Xeon.
 - **Speculation** with overlapping check, one byte per value, baton passing and the cheaper
-  check makes it 7–10× faster again: **≈ 2.5–2.9 million values per second** at 10⁷ (wall
-  clock including printing the values; the compute time alone is 3.1–3.6 s).  Grossman's speculation
+  check makes it 6.5–10× faster again: **≈ 2.7–3.5 million values per second** at 10⁷ (wall
+  clock including printing the values; the compute time alone is 2.4–3.2 s).  Grossman's speculation
   gave 2.2× (196,000 values/s), one byte per value 321,000 values/s, and with unrolled code and
   baton passing on 8 threads 5.2 million values/s (with the check on a separate cluster); here
   the check runs on the same 24 threads, at the same time as the speculation.
-- At \(n = 10^6\), `rare` is 14–19× faster than `blocked` on all 24 threads, and about 250× faster
+- At \(n = 10^6\), `rare` is 13–19× faster than `blocked` on all 24 threads, and about 200× faster
   than brute force (143 s for `.6`).  At \(10^7\) the O(n²) methods would need roughly 100× their
-  10⁶ time (about 1000 s for `blocked`), so `rare` is then about 250–280× faster than `blocked`, and
+  10⁶ time (about 1000 s for `blocked`), so `rare` is then about 270–350× faster than `blocked`, and
   the gap keeps growing with \(n\).
 - Below about 2·10⁵, `blocked` is faster: `rare` uses brute force on one core until its mask is
   chosen at n = 32768.
@@ -344,12 +383,15 @@ The full table, with all sizes, is in `benchmarks/results/methods.md`.
 
 ## Not implemented yet (Grossman §3)
 
-- **Generated, fully unrolled code** for step 1 and for the mex search: the rare heap sizes
-  and their values are constants, about three instructions per rare heap.
+- Generated code for the mex search (the step-1 code is generated, see above; the mex search
+  is already short with the speculative mex).
 
-Speculation and check now take similar time on the 24 threads; the mask checkpoints at
-\(n = 4^k \cdot 2048\) still drain the pipeline.  Grossman checked the intervals on a cluster,
-separately from the speculation, so the paper does not cover this balance.
+Speculation and check now take similar time on the 24 threads.  Not draining the pipeline at
+the mask checkpoints (choosing the mask on the speculative values, which is safe because every
+mask is exact) was tried and gained nothing measurable: there are only two checkpoints up to
+10⁷, and each drain costs well under 0.1 s.  Pinning threads (`OMP_PROC_BIND=true` with the
+team on one CCD) gains about 3%.  Grossman checked the intervals on a cluster, separately from
+the speculation, so the paper does not cover this balance.
 
 Step 1 needs only the rare heap sizes and the last 20,628 values, not the whole sequence.  That
 is presumably what makes 2⁴⁷ values feasible; the paper does not discuss storage.

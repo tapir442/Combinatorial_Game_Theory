@@ -47,6 +47,7 @@
  * Sections: rules · Grundy computation · periodicity · library API.
  */
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE          /* MAP_ANONYMOUS (generated step-1 code, RareJit) */
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
@@ -56,6 +57,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
 #ifdef _OPENMP
@@ -915,6 +917,12 @@ typedef struct {
     uint8_t cbyte[256];       /**< ... and their bytes */
     int ncommon;              /**< number of entries of common (256 if the mask has a bit below 512) */
     uint32_t mark[256];       /**< mark table, indexed by byte, stamped with n */
+    /* generated step-1 code (rb_jit_update()) */
+    void (*jit)(const uint8_t *gm, uint32_t *mark, uint32_t stamp); /**< or NULL */
+    void *jit_mem;            /**< its executable memory (mmap) ... */
+    size_t jit_len;           /**< ... and length */
+    long jit_from;            /**< it covers the rare entries jit_from .. jit_nr-1 */
+    long jit_nr;              /**< rare entries when it was generated; -1: invalid */
 } RareBytes;
 
 /** byte(v): delete bit @p j (see RareBytes). */
@@ -924,6 +932,7 @@ static inline unsigned rb_byte(unsigned v, unsigned j) {
 
 /** Free @p B and reset it to zero. */
 static void rb_free(RareBytes *B) {
+    if (B->jit_mem) munmap(B->jit_mem, B->jit_len);
     free(B->g8);
     free(B->rpos);
     free(B->rval);
@@ -948,6 +957,8 @@ static int rb_setup(RareBytes *B, const Rule *R, unsigned mask, unsigned maxG, l
     B->on = !R->hex && maxG < 512 && low != 0;
     B->known = 0;
     B->nr = 0;
+    B->jit = NULL;
+    B->jit_nr = -1;
     if (!B->on) return 0;
     B->drop = 31 - (unsigned)__builtin_clz(low);
     if (to > B->cap) {
@@ -963,6 +974,8 @@ static int rb_setup(RareBytes *B, const Rule *R, unsigned mask, unsigned maxG, l
             B->cbyte[B->ncommon++] = (uint8_t)rb_byte(v, B->drop);
         }
     memset(B->mark, 0xff, sizeof B->mark);
+    B->jit = NULL;            /* the values changed: regenerate (rb_jit_update()) */
+    B->jit_nr = -1;
     return 0;
 }
 
@@ -990,6 +1003,81 @@ static int rb_catch_up(RareBytes *B, const uint16_t *G, long n, const long *rare
         B->rval[B->nr] = B->g8[rare[B->nr]];
     }
     return 0;
+}
+
+/**
+ * @brief Generated step-1 code (Grossman 2017, section 3.2: "fully unrolled").
+ *
+ * Step 1 on bytes marks rval[i] ^ g8[m - rpos[i]] for every rare entry i.  The
+ * rare list changes only when a new rare value appears, so its entries can be
+ * constants in code: per entry three instructions,
+ *
+ *     movzx eax, byte [rdi - rpos]     ; g8[m - rpos], rdi = g8 + m
+ *     xor   eax, rval                  ; (left out if rval = 0)
+ *     mov   [rsi + 4 * rax], edx       ; mark[...] = stamp
+ *
+ * instead of three loads, an XOR and a store per entry in the loop.  On a Ryzen
+ * 9 7900X with the 1584 rare entries of .6 at 10^7: 0.19 ns per entry instead
+ * of 0.40 (0.30 instead of 0.63 us per heap size).  The machine code is written
+ * directly (x86-64 only; no compiler needed at run time) into an anonymous
+ * mapping, which is then made executable and read-only (mprotect).
+ *
+ * The code covers the entries with rpos >= RARE_JIT_SKIP (from jit_from on),
+ * so the baton passing can still split off the few small rare heap sizes whose
+ * partner is one of the last P - 1 values (P <= RARE_JIT_SKIP; see
+ * rare_baton_worker()).  The loop does the rest.
+ *
+ * rb_jit_update() regenerates it when the rare list or the mask changed; it is
+ * only called between parallel regions, so no thread runs the code meanwhile.
+ * Users check B->jit (NULL: use the loop) and B->jit_nr == B->nr.
+ * OCTAL_JIT=0 switches it off (for comparisons).
+ */
+#define RARE_JIT_SKIP 16
+
+/** Regenerate B->jit for the current rare bytes if needed (see above).  On any failure B->jit stays NULL. */
+static void rb_jit_update(RareBytes *B) {
+    if (!B->on || B->jit_nr == B->nr) return;
+    if (B->jit_mem) munmap(B->jit_mem, B->jit_len);
+    B->jit = NULL;
+    B->jit_mem = NULL;
+    B->jit_nr = B->nr;
+#if defined(__x86_64__)
+    const char *env = getenv("OCTAL_JIT");
+    if (env && *env == '0') return;
+    long from = 0;
+    while (from < B->nr && B->rpos[from] < RARE_JIT_SKIP) from++;
+    if (B->nr - from < 64) return;                 /* not worth it */
+    size_t len = 4 + (size_t)(B->nr - from) * 15 + 1;
+    uint8_t *c = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (c == MAP_FAILED) return;
+    uint8_t *q = c;
+    *q++ = 0xf3; *q++ = 0x0f; *q++ = 0x1e; *q++ = 0xfa;          /* endbr64 */
+    for (long i = from; i < B->nr; i++) {
+        int32_t disp = -(int32_t)B->rpos[i];
+        *q++ = 0x0f; *q++ = 0xb6; *q++ = 0x87;                    /* movzx eax, byte [rdi + disp32] */
+        memcpy(q, &disp, 4); q += 4;
+        if (B->rval[i]) {
+            uint32_t v = B->rval[i];
+            *q++ = 0x35;                                         /* xor eax, imm32 */
+            memcpy(q, &v, 4); q += 4;
+        }
+        *q++ = 0x89; *q++ = 0x14; *q++ = 0x86;                    /* mov [rsi + 4*rax], edx */
+    }
+    *q++ = 0xc3;                                                 /* ret */
+    if (mprotect(c, len, PROT_READ | PROT_EXEC)) { munmap(c, len); return; }
+    B->jit_mem = c;
+    B->jit_len = len;
+    B->jit_from = from;
+    B->jit = (void (*)(const uint8_t *, uint32_t *, uint32_t))(void *)c;
+#endif
+}
+
+/** Bring @p B up to heap size @p n and the rare list (rb_catch_up()) and its generated code
+ *  up to date.  Only between parallel regions. */
+static void rb_ready(RareBytes *B, const uint16_t *G, long n, const long *rare, long nrare) {
+    if (!B || !B->on) return;
+    if (B->known < n || B->nr < nrare) rb_catch_up(B, G, n, rare, nrare);
+    rb_jit_update(B);
 }
 
 /**
@@ -1027,7 +1115,12 @@ static unsigned rare_step1_bytes(const RareBytes *B, uint32_t *mark, const Rule 
         if ((d & 2) && k > 0 && !rv_rare(G[m], mask)) mark[B->g8[m]] = stamp;
         if (d & 4) {
             const uint8_t *gm = B->g8 + m;   /* gm[-a] = byte(G(m - a)) */
-            for (long i = 0; i < nr; i++) mark[rval[i] ^ gm[-(long)rpos[i]]] = stamp;
+            if (B->jit && B->jit_nr == nr) {
+                for (long i = 0; i < B->jit_from; i++) mark[rval[i] ^ gm[-(long)rpos[i]]] = stamp;
+                B->jit(gm, mark, stamp);
+            } else {
+                for (long i = 0; i < nr; i++) mark[rval[i] ^ gm[-(long)rpos[i]]] = stamp;
+            }
             st->scan1 += nr;
         }
     }
@@ -1193,6 +1286,8 @@ static void rare_baton_worker(RareBytes *B, const Rule *R, uint16_t *G, long n0,
     const long nr = B->nr;
     uint32_t mark[256];
     memset(mark, 0xff, sizeof mark);
+    void (*jit)(const uint8_t *, uint32_t *, uint32_t) =
+        B->jit && B->jit_nr == nr && P <= RARE_JIT_SKIP ? B->jit : NULL;
     /* split[k]: first rare index with rpos >= P - k; below it the partner m - a
      * is one of the last P - 1 values (post-baton) */
     long split[MAXDIG + 1];
@@ -1214,7 +1309,12 @@ static void rare_baton_worker(RareBytes *B, const Rule *R, uint16_t *G, long n0,
             if ((d & 2) && k >= P && !rv_rare(G[m], mask)) mark[g8[m]] = stamp;
             if (d & 4) {
                 const uint8_t *gm = g8 + m;
-                for (long i = split[k]; i < nr; i++) mark[rval[i] ^ gm[-(long)rpos[i]]] = stamp;
+                if (jit) {                  /* split[k] <= jit_from, since P <= RARE_JIT_SKIP */
+                    for (long i = split[k]; i < B->jit_from; i++) mark[rval[i] ^ gm[-(long)rpos[i]]] = stamp;
+                    jit(gm, mark, stamp);
+                } else {
+                    for (long i = split[k]; i < nr; i++) mark[rval[i] ^ gm[-(long)rpos[i]]] = stamp;
+                }
             }
         }
         int ci = 0;
@@ -1453,6 +1553,7 @@ static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long en
             maxA = *maxG;
             vcapA = *vcap;
             Baton T;
+            rb_ready(B, G, a0, *rare, *nrare);
             rare_spec_prepare(&T, R, G, a0, rare_chunk_end(a0, end), *rare, *nrare, B, P);
             RareStats specst = {0};
 #pragma omp parallel num_threads(T.P) if (T.P > 1)
@@ -1490,7 +1591,7 @@ static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long en
         /* the check of A runs step 1 on bytes where it can: g8 must cover A,
          * and nothing in B may change during the region (the speculation only
          * writes g8 from a1 on) */
-        if (B && B->on && B->known < a1) rb_catch_up(B, G, a1, *rare, *nrare);
+        rb_ready(B, G, a1, *rare, *nrare);
         const RareBytes *CB = B && B->on && B->known >= a1 && B->nr == *nrare ? B : NULL;
         long bytes_from = (*nrare ? 2 * (*rare)[*nrare - 1] : 0) + R->t + 1;
 #pragma omp parallel num_threads(nt)
@@ -1557,12 +1658,15 @@ static int rare_baton_size(int nt) {
  * n = 2048, 8192, 32768, ... (and at @p from, if that is past 2048).  Gives the
  * same values as grundy_brute() for every mask; the mask only affects the speed.
  *
- * With one thread it runs grundy_rare() for every heap size.  With more, from
+ * With one thread it runs grundy_rare() for every heap size, with step 1 on
+ * bytes and the generated code (grundy_rare_bytes(), rb_jit_update()) where the
+ * byte mode applies.  With more, from
  * RARE_SPEC_MIN on it uses speculation with overlapping check (rare_spec_run()):
  * step 1 on one thread, the full check of the previous chunk on the others at
  * the same time, in chunks of n/8 heap sizes (4096 .. 2^18).  The speculation
  * uses one byte per value where possible (RareBytes) and then runs on a team of
- * rare_baton_size() threads (baton passing, see Baton).
+ * rare_baton_size() threads (baton passing, see Baton); step 1 of both the
+ * speculation and the check runs generated code (rb_jit_update()).
  *
  * Each call (and each mask checkpoint) starts and ends the pipeline with one
  * chunk speculated and one checked without overlap, so callers should pass
@@ -1609,7 +1713,7 @@ static int extend_rare(const Rule *R, uint16_t *G, long from, long to, int threa
                 mask = m;
                 nrare = rv_collect(G, n, mask, &rare, &cap);
                 if (nrare < 0) { rc = -3; break; }
-                if (nt > 1 && (rc = rb_setup(&B, R, mask, maxG, to))) break;
+                if ((rc = rb_setup(&B, R, mask, maxG, to))) break;
             }
             if (n == next_check) next_check *= 4;
         }
@@ -1624,8 +1728,14 @@ static int extend_rare(const Rule *R, uint16_t *G, long from, long to, int threa
             continue;
         }
         long long before = st->scan1 + st->scan2;
-        unsigned g = active ? grundy_rare(&S, R, G, n, mask, rare, nrare, st)
-                            : grundy_brute(&S, R, G, n, pairs);
+        unsigned g = UINT_MAX;
+        if (active && B.on && n >= (nrare ? 2 * rare[nrare - 1] : 0) + R->t + 1) {
+            /* step 1 on bytes with the generated code, as in the speculation */
+            rb_ready(&B, G, n, rare, nrare);
+            if (B.on) g = grundy_rare_bytes(&S, &B, B.mark, R, G, n, mask, st);
+        }
+        if (g == UINT_MAX)
+            g = active ? grundy_rare(&S, R, G, n, mask, rare, nrare, st) : grundy_brute(&S, R, G, n, pairs);
         if (active) *pairs += st->scan1 + st->scan2 - before;
         rc = store_value(&S, G, n, g, &maxG, &vcap);
         if (progress && (n & 65535) == 65535) progress(n + 1, pctx);
