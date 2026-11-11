@@ -72,7 +72,7 @@ values **are** reachable, which can stop early.
 Step 2 is about 60% of the work, and it almost never changes the result.  So `rare_spec_run`
 works on chunks of \(n/8\) heap sizes (between 4096 and 2¹⁸, ending at the next mask checkpoint):
 
-1. **Speculate** on one thread (`rare_speculate`): compute every value of the chunk with step 1
+1. **Speculate** on one thread (`rare_speculate`; now on a small team, see *Baton passing*): compute every value of the chunk with step 1
    only, that is, assume that no new rare value appears.  Speculative values are always common.
 2. **Check** in parallel (`rare_check_worker`): recompute every value of the chunk with the full
    algorithm, taking the speculative values before it as given.  Given those values, the heap
@@ -146,6 +146,58 @@ Effect, same machine (seconds, 24 threads, identical values):
 
 The speculating thread for `.6` to 10⁷ now computes for 7.7 s instead of 13.0 s and waits for
 the check 2.0 s, so the check starts to matter again.
+
+## Baton passing (Grossman §3.3)
+
+Most of step 1 for \(G(n)\) does not depend on the last few values.  So a **team** of \(P\)
+threads speculates each chunk (`rare_baton_worker`, `rare_speculate_chunk`; byte mode only):
+thread \(j\) takes the heap sizes \(n \equiv n_0 + j \pmod P\), and for each of them
+
+1. **before the baton** marks every byte whose inputs are already final: the step-1 pairs
+   \((a, m-a)\), \(m = n - k\), with partner \(m - a \le n - P\), i.e. rare \(a \ge P - k\), and the
+   1-heap options \(n - k\) with \(k \ge P\).  These values are final because the thread's own
+   previous heap size \(n - P\) already had the baton.  Then it takes the smallest unmarked
+   common value as candidate (Grossman's **speculative mex**);
+2. waits for the **baton**: a shared counter `upto` (all values below it are final) reaching
+   \(n\) (acquire load; spinning with `pause`);
+3. **after the baton** marks the rest: the few rare \(a < P - k\) and the 1-heap options with
+   \(k < P\).  Marks only grow, so the value is the candidate unless the candidate just got
+   marked; then the search continues from there;
+4. stores \(G(n)\) and its byte and passes the baton (`upto = n + 1`, release store).
+
+Steps 1 and 3 together mark exactly what the one-thread byte step 1 marks, so the speculative
+values are identical (checked: same values and same restart counts as before for every team
+size from 1 to 23).  On the critical path per value there is only the hand-over plus a handful
+of marks.  If all 256 common bytes are reachable (the value would not fit), the thread with the
+baton stops the team and thread 0 continues the chunk alone with the 16-bit step 1.
+
+The team is threads 0 .. P−1 of the same parallel region in which the others check the previous
+chunk; at most \(n_t - 1\) speculate, so at least one thread checks from the start.  The team
+size is 4 (at most half the threads); `OCTAL_BATON=P` overrides it (`1` = one thread, as
+before).  It is printed in `summary.txt`.
+
+**Pipeline drains.**  With the speculation that much faster, the restarts of the pipeline began
+to dominate: `compute()` used to call `extend_rare` once per \(n/8\) heap sizes (for the progress
+display), and every call speculates its first chunk and checks its last one without overlap.
+For `.6` to 10⁷ that was 3.6 s of 6.6 s.  `compute()` now passes the whole range in one call,
+and `extend_rare` reports progress itself after each checked chunk.  (The mask checkpoints at
+\(n = 4^k \cdot 2048\) still drain the pipeline.)
+
+Effect for `.6` to 10⁷ (Ryzen 9 7900X, 24 threads, identical values; compute time in seconds):
+
+| team size \(P\) | 1 | 2 | 4 | 6 | 8 | 12 |
+|---|---:|---:|---:|---:|---:|---:|
+| `extend_rare` per \(n/8\) | 9.87 | 7.09 | **5.82** | 6.04 | 6.28 | 7.31 |
+| one call | 8.94 | – | **4.92** | 4.95 | – | – |
+
+Without baton passing, the old code took 9.88 s.  With \(P = 4\) the team spends about 3.2 s of
+the 4.9 s speculating; the regions in which it runs take 4.6 s, because the **check** of each
+chunk (the full algorithm, 16-bit, on the remaining 20 threads) now takes longer than the
+speculation.  So larger teams no longer help, and the next step is a cheaper check, not more
+speculation.  Thread binding (`OMP_PROC_BIND`, `OMP_PLACES`) changed little (5.6–6.4 s).
+
+Grossman reached 5.2 million values per second with 8 threads (speculative mex), against about
+2 million here.  His check ran on a separate cluster; here the same 24 threads do both.
 
 ## Failed stores
 
@@ -256,15 +308,11 @@ The full table, with all sizes, is in `benchmarks/results/methods.md`.
 
 ## Not implemented yet (Grossman §3)
 
-Grossman's further speed-ups, about 60× in total together with speculation, overlap and one
-byte per value:
-
 - **Generated, fully unrolled code** for step 1 and for the mex search: the rare heap sizes
   and their values are constants, about three instructions per rare heap.
-- **Baton passing.**  Thread \(j\) computes the \(n \equiv j \pmod{m}\), marks everything that
-  does not depend on the last \(m - 1\) values in advance, receives those values from the
-  previous thread, finishes, and passes them on.  Plus a speculative mex before the baton
-  arrives.
+
+Since baton passing, the parallel check is the bottleneck (see above).  Grossman checked the
+intervals on a cluster, separately from the speculation, so the paper does not cover this case.
 
 Step 1 needs only the rare heap sizes and the last 20,628 values, not the whole sequence.  That
 is presumably what makes 2⁴⁷ values feasible; the paper does not discuss storage.

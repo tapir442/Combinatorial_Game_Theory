@@ -38,8 +38,9 @@
  * shader (octal_gpu.comp, see extend_device()); needs -DOCTAL_VULKAN -lvulkan.
  * `--rare` is Grossman's rare-value algorithm (Games of No Chance 5, 2017; see
  * extend_rare()): exact, nearly independent of n per value when few heap sizes
- * have rare values.  With -j 1 one core; otherwise speculation: step 1 on one
- * core, the full check of each chunk in parallel.
+ * have rare values.  With -j 1 one core; otherwise speculation: step 1 on a
+ * small team of threads with baton passing, the full check of each chunk in
+ * parallel on the others.
  * `--rocm` does the same with a HIP kernel (octal_rocm.hip, compiled with
  * hipcc and linked in); needs -DOCTAL_ROCM and the object file.
  *
@@ -125,7 +126,11 @@ typedef struct {
     long long speculated;     /**< values computed speculatively (step 1 only) */
     long long restarts;       /**< speculative chunks that failed the check (a new rare value) */
     long long bytes;          /**< speculative values computed with one byte per value (RareBytes) */
+    int baton;                /**< size of the speculation team (Baton; 1 = one thread) */
 } RareStats;
+
+/** Progress report: called with the number of heap sizes now final (G[0..n) correct). */
+typedef void (*ProgressFn)(long n, void *ctx);
 
 /** @brief Result of compute(): the nim-sequence plus statistics. */
 typedef struct {
@@ -1070,6 +1075,188 @@ static long rare_speculate(Scratch *S, const Rule *R, uint16_t *G, long n0, long
 }
 
 /**
+ * @brief Baton passing (Grossman 2017, section 3.3): the speculation of one chunk by a team.
+ *
+ * A team of P threads speculates G[n0..e) in byte mode (RareBytes); thread j
+ * takes the heap sizes n = n0 + j, n0 + j + P, ...  For each n it
+ *
+ * 1. *before the baton* marks every byte that does not depend on the last
+ *    P - 1 values: step-1 pairs (a, m - a) with m - a <= n - P, i.e. rare
+ *    a >= P - k for m = n - k, and 1-heap options n - k with k >= P.  These
+ *    values are final: the thread's own previous heap size n - P had the baton,
+ *    so everything below it was published, and it published n - P itself.
+ *    Then it takes the smallest unmarked common value as the candidate
+ *    (Grossman's *speculative mex*);
+ * 2. waits for the baton: the shared counter `upto` (values below it are final)
+ *    reaching n;
+ * 3. *after the baton* marks the rest: the few rare a < P - k, and the 1-heap
+ *    options with k < P.  Marks only grow, so the value is the candidate unless
+ *    it got marked now; then the search continues from there;
+ * 4. stores G(n) and g8[n] and passes the baton (upto = n + 1, release).
+ *
+ * Steps 1 and 3 together mark exactly what rare_step1_bytes() marks, so the
+ * speculative values are the same as with one thread.  The critical path per
+ * value is the baton hand-over plus step 3 (a handful of marks), instead of all
+ * of step 1.
+ *
+ * If all 256 common bytes get marked (the value does not fit; rare_step1_bytes()
+ * would return UINT_MAX), the thread holding the baton sets `stopat` and stops
+ * without passing it; the threads waiting for later heap sizes see that and
+ * stop too.  rare_speculate_chunk() then continues on one thread.
+ *
+ * Shared state of one team, set up by rare_speculate_chunk().
+ */
+typedef struct {
+    long upto;         /**< atomic: G and g8 are final below this heap size (the baton) */
+    long stopat;       /**< atomic: heap size where the team gave up (e if none) */
+    long e;            /**< one past the last heap size of the chunk */
+    int P;             /**< team size */
+    int team;          /**< 1: baton passing; 0: thread 0 alone (rare_speculate()) */
+    long done;         /**< rare_speculate_chunk(): end of the speculated range (set by thread 0) */
+    int rc;            /**< rare_speculate_chunk(): store_value() error of thread 0 */
+} Baton;
+
+/** Spin-wait hint for the baton loop. */
+static inline void cpu_relax(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#endif
+}
+
+/**
+ * @brief One thread (@p j of the team) of the baton-passing speculation; see Baton.
+ *
+ * Needs B->g8[0..n0) and the rare bytes (rb_catch_up()), n0 at least the
+ * byte-mode limit of rare_speculate(), and no 3-heap moves (byte mode).
+ *
+ * @param B     byte state (g8 is written; mark is not used, each thread has its own)
+ * @param R     rule
+ * @param G     nim-values; G[n0..e) written
+ * @param n0    first heap size of the chunk
+ * @param mask  rare-value mask
+ * @param T     shared team state
+ * @param j     this thread's index in the team, 0 .. P-1
+ * @param st    statistics: scan1 and bytes are added atomically
+ */
+static void rare_baton_worker(RareBytes *B, const Rule *R, uint16_t *G, long n0, unsigned mask, Baton *T,
+                              int j, RareStats *st) {
+    const int P = T->P;
+    const uint32_t *rpos = B->rpos;
+    const uint8_t *rval = B->rval;
+    const uint8_t *g8 = B->g8;
+    const long nr = B->nr;
+    uint32_t mark[256];
+    memset(mark, 0xff, sizeof mark);
+    /* split[k]: first rare index with rpos >= P - k; below it the partner m - a
+     * is one of the last P - 1 values (post-baton) */
+    long split[MAXDIG + 1];
+    long pairs_per_n = 0;
+    for (int k = 0; k <= R->t; k++) {
+        long i = 0;
+        while (i < nr && (long)rpos[i] < P - k) i++;
+        split[k] = i;
+        if (R->d[k] & 4) pairs_per_n += nr;
+    }
+    long count = 0;
+    for (long n = n0 + j; n < T->e; n += P) {
+        uint32_t stamp = (uint32_t)n;
+        /* 1. before the baton */
+        for (int k = 0; k <= R->t; k++) {
+            unsigned d = R->d[k];
+            if (!d) continue;
+            long m = n - k;
+            if ((d & 2) && k >= P && !rv_rare(G[m], mask)) mark[g8[m]] = stamp;
+            if (d & 4) {
+                const uint8_t *gm = g8 + m;
+                for (long i = split[k]; i < nr; i++) mark[rval[i] ^ gm[-(long)rpos[i]]] = stamp;
+            }
+        }
+        int ci = 0;
+        while (ci < B->ncommon && mark[B->cbyte[ci]] == stamp) ci++;
+        /* 2. wait for the baton */
+        while (__atomic_load_n(&T->upto, __ATOMIC_ACQUIRE) < n) {
+            if (__atomic_load_n(&T->stopat, __ATOMIC_RELAXED) < n) goto out;
+            cpu_relax();
+        }
+        /* 3. after the baton */
+        for (int k = 0; k <= R->t; k++) {
+            unsigned d = R->d[k];
+            if (!d) continue;
+            long m = n - k;
+            if ((d & 2) && k > 0 && k < P && !rv_rare(G[m], mask)) mark[g8[m]] = stamp;
+            if (d & 4) {
+                const uint8_t *gm = g8 + m;
+                for (long i = 0; i < split[k]; i++) mark[rval[i] ^ gm[-(long)rpos[i]]] = stamp;
+            }
+        }
+        while (ci < B->ncommon && mark[B->cbyte[ci]] == stamp) ci++;
+        if (ci == B->ncommon) {     /* does not fit in a byte: give up, keep the baton */
+            __atomic_store_n(&T->stopat, n, __ATOMIC_RELAXED);
+            break;
+        }
+        /* 4. store and pass the baton */
+        G[n] = B->common[ci];
+        B->g8[n] = B->cbyte[ci];
+        __atomic_store_n(&T->upto, n + 1, __ATOMIC_RELEASE);
+        count++;
+    }
+out:
+    __atomic_add_fetch(&st->scan1, (long long)count * pairs_per_n, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&st->bytes, (long long)count, __ATOMIC_RELAXED);
+}
+
+/**
+ * @brief Speculate G[n0..e): with a team (baton passing) where possible, else rare_speculate().
+ *
+ * Called by every thread @p j < T->P of a parallel region, after
+ * rare_spec_prepare() set up @p T.  Thread 0 finishes the chunk: it waits for
+ * the team, takes over sequentially where the team gave up, and updates maxG,
+ * vcap and B->known.  Result in T->done (end of the speculated range) and T->rc
+ * (as rare_speculate()).  The other team threads return as soon as they are done.
+ */
+static void rare_speculate_chunk(Scratch *S, const Rule *R, uint16_t *G, long n0, unsigned mask,
+                                 const long *rare, long nrare, unsigned *maxG, unsigned *vcap, RareBytes *B,
+                                 Baton *T, int j, RareStats *st) {
+    if (!T->team) {
+        if (j == 0) T->done = rare_speculate(S, R, G, n0, T->e, mask, rare, nrare, maxG, vcap, B, st, &T->rc);
+        return;
+    }
+    rare_baton_worker(B, R, G, n0, mask, T, j, st);
+    if (j) return;
+    /* thread 0: wait until the team has finished or given up */
+    long u;
+    while ((u = __atomic_load_n(&T->upto, __ATOMIC_ACQUIRE)) < T->e &&
+           __atomic_load_n(&T->stopat, __ATOMIC_RELAXED) >= T->e)
+        cpu_relax();
+    for (long i = n0; i < u; i++)
+        if (G[i] > *maxG) *maxG = G[i];
+    while (*vcap <= *maxG) *vcap *= 2;
+    B->known = u;
+    st->speculated += u - n0;
+    if (scratch_reserve(S, 2 * (size_t)*vcap + 2)) { T->done = u; T->rc = -3; return; }
+    T->done = u < T->e ? rare_speculate(S, R, G, u, T->e, mask, rare, nrare, maxG, vcap, B, st, &T->rc) : u;
+}
+
+/**
+ * @brief Set up @p T for rare_speculate_chunk() on G[n0..e) with up to @p P threads.
+ *
+ * Baton passing needs at least 2 threads, the byte mode (RareBytes; caught up
+ * to n0 here) and n0 at least the byte-mode limit of rare_speculate().
+ */
+static void rare_spec_prepare(Baton *T, const Rule *R, const uint16_t *G, long n0, long e, const long *rare,
+                              long nrare, RareBytes *B, int P) {
+    memset(T, 0, sizeof *T);
+    T->e = e;
+    T->upto = n0;
+    T->stopat = e;
+    T->done = n0;
+    long bytes_from = (nrare ? 2 * rare[nrare - 1] : 0) + R->t + 1;
+    T->team = P > 1 && B && B->on && n0 >= bytes_from && e - n0 >= P && !rb_catch_up(B, G, n0, rare, nrare) &&
+              B->on;
+    T->P = T->team ? P : 1;
+}
+
+/**
  * @brief Check part of the speculation: run by every checking thread.
  *
  * Recomputes G(n) for heap sizes of [n0, e) with the full grundy_rare(), taking
@@ -1149,8 +1336,9 @@ static int rare_append(long **rare, long *nrare, long *cap, long n) {
  * The heap sizes are handled in chunks (rare_chunk_end()).  Chunk A is
  * speculated (rare_speculate()); then, in one parallel region,
  *
- * - thread 0 speculates the next chunk B, assuming that A is correct, and then
- *   joins the check;
+ * - the team, threads 0 .. P-1, speculates the next chunk B, assuming that A is
+ *   correct (rare_speculate_chunk(): baton passing, see Baton), and then joins
+ *   the check;
  * - all other threads check A (rare_check_worker()).
  *
  * This is safe: checking A reads only G below the end of A, and speculating B
@@ -1174,6 +1362,9 @@ static int rare_append(long **rare, long *nrare, long *cap, long n) {
  * 85% of the time; the sequential speculation (about 1.3 us per value) is the
  * limit.  Idle checking threads must not spin on thread 0's physical core:
  * OMP_WAIT_POLICY=active costs about 25%, the default and "passive" are fine.
+ * With baton passing (team of 4) and one call for the whole range, .6 to 10^7
+ * takes 5.0 s; the team speculates about 3 s of it, so the check is now the
+ * limit.
  *
  * @param S      main scratch (used by thread 0)
  * @param R      rule
@@ -1188,14 +1379,18 @@ static int rare_append(long **rare, long *nrare, long *cap, long n) {
  * @param vcap   in/out: power of two above @p maxG
  * @param nt     number of threads (at least 2 to overlap anything; with one,
  *               thread 0 speculates B and then checks A alone)
+ * @param P      size of the speculation team (at most nt - 1 while a check
+ *               runs; 1: thread 0 alone)
  * @param B      one-byte state for the speculation (may be NULL)
  * @param st     statistics, updated
+ * @param progress  called after each chunk that passed the check (may be NULL)
+ * @param pctx      passed to @p progress
  * @return 0, -2 (value > 65535) or -3 (out of memory); G is correct below the
  *         heap size where it stopped
  */
 static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long end, unsigned mask,
                          long **rare, long *nrare, long *cap, unsigned *maxG, unsigned *vcap, int nt,
-                         RareBytes *B, RareStats *st) {
+                         int P, RareBytes *B, RareStats *st, ProgressFn progress, void *pctx) {
     long a0 = n, a1 = n;            /* chunk A = [a0, a1): speculated, not yet checked */
     unsigned maxA = *maxG, vcapA = *vcap;   /* maxG and vcap over G[0..a0) */
     while (a0 < end) {
@@ -1203,8 +1398,22 @@ static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long en
         if (a1 == a0) {             /* nothing pending: speculate A on its own */
             maxA = *maxG;
             vcapA = *vcap;
-            a1 = rare_speculate(S, R, G, a0, rare_chunk_end(a0, end), mask, *rare, *nrare, maxG, vcap, B, st,
-                                &rc);
+            Baton T;
+            rare_spec_prepare(&T, R, G, a0, rare_chunk_end(a0, end), *rare, *nrare, B, P);
+            RareStats specst = {0};
+#pragma omp parallel num_threads(T.P) if (T.P > 1)
+            {
+                int tid = 0;
+#ifdef _OPENMP
+                tid = omp_get_thread_num();
+#endif
+                rare_speculate_chunk(S, R, G, a0, mask, *rare, *nrare, maxG, vcap, B, &T, tid, &specst);
+            }
+            st->scan1 += specst.scan1;
+            st->speculated += specst.speculated;
+            st->bytes += specst.bytes;
+            a1 = T.done;
+            rc = T.rc;
             if (a1 == a0) {         /* storing failed at a0 itself: compute it exactly */
                 unsigned g = grundy_rare(S, R, G, a0, mask, *rare, *nrare, st);
                 if ((rc = store_value(S, G, a0, g, maxG, vcap))) return rc;
@@ -1219,23 +1428,28 @@ static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long en
         size_t need = 2 * (size_t)*vcap + 2;
         long cursor = a0, bad = a1;
         unsigned badval = 0;
-        int oom = 0, rcB = 0;
+        int oom = 0;
         RareStats specst = {0};
+        Baton T;
+        /* the team: threads 0 .. T.P-1 (at most nt - 1, so that one thread checks from the start) */
+        rare_spec_prepare(&T, R, G, a1, b1, *rare, *nrare, B, P < nt ? P : nt - 1);
 #pragma omp parallel num_threads(nt)
         {
             int tid = 0;
 #ifdef _OPENMP
             tid = omp_get_thread_num();
 #endif
-            if (tid == 0 && b1 > a1)
-                bend = rare_speculate(S, R, G, a1, b1, mask, *rare, *nrare, maxG, vcap, B, &specst, &rcB);
+            if (tid < T.P && b1 > a1)
+                rare_speculate_chunk(S, R, G, a1, mask, *rare, *nrare, maxG, vcap, B, &T, tid, &specst);
             rare_check_worker(R, G, a1, mask, *rare, *nrare, need, &cursor, &bad, &badval, &oom, st);
         }
+        if (b1 > a1) bend = T.done;
         st->scan1 += specst.scan1;
         st->speculated += specst.speculated;
         st->bytes += specst.bytes;
         if (oom) return -3;
         if (bad == a1) {            /* A is correct; B (if any) is the next chunk to check */
+            if (progress) progress(a1, pctx);
             a0 = a1;
             a1 = bend;
             maxA = maxB;
@@ -1257,6 +1471,18 @@ static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long en
     return 0;
 }
 
+/** Default size of the speculation team (Baton), at most nt / 2.  Override: OCTAL_BATON=P. */
+#define RARE_BATON_DEFAULT 4
+
+/** Size of the speculation team for @p nt threads: OCTAL_BATON or RARE_BATON_DEFAULT, 1 .. nt. */
+static int rare_baton_size(int nt) {
+    int P = RARE_BATON_DEFAULT < nt / 2 ? RARE_BATON_DEFAULT : nt / 2;
+    const char *e = getenv("OCTAL_BATON");
+    if (e && *e) P = atoi(e);
+    if (P > nt) P = nt;
+    return P < 1 ? 1 : P;
+}
+
 /** The rare-value method is used while at most this fraction of heap sizes is rare. */
 #define RARE_MAX_FRACTION 0.05
 
@@ -1272,7 +1498,12 @@ static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long en
  * RARE_SPEC_MIN on it uses speculation with overlapping check (rare_spec_run()):
  * step 1 on one thread, the full check of the previous chunk on the others at
  * the same time, in chunks of n/8 heap sizes (4096 .. 2^18).  The speculation
- * uses one byte per value where possible (RareBytes).
+ * uses one byte per value where possible (RareBytes) and then runs on a team of
+ * rare_baton_size() threads (baton passing, see Baton).
+ *
+ * Each call (and each mask checkpoint) starts and ends the pipeline with one
+ * chunk speculated and one checked without overlap, so callers should pass
+ * large ranges (compute() passes all of them at once).
  *
  * @param R        rule
  * @param G        array of at least @p to entries; G[0..from) valid
@@ -1281,14 +1512,18 @@ static int rare_spec_run(Scratch *S, const Rule *R, uint16_t *G, long n, long en
  * @param threads  1: plain algorithm; > 1: speculation with that many threads; <= 0: all cores
  * @param pairs    incremented by the number of two-heap pairs examined
  * @param st       statistics (may be NULL)
+ * @param progress called now and then with the number of final heap sizes (may be NULL)
+ * @param pctx     passed to @p progress
  * @return 0, -2 (value > 65535) or -3 (out of memory)
  */
 static int extend_rare(const Rule *R, uint16_t *G, long from, long to, int threads, long long *pairs,
-                       RareStats *st) {
+                       RareStats *st, ProgressFn progress, void *pctx) {
     RareStats dummy = {0};
     if (!st) st = &dummy;
     int nt = threads == 1 ? 1 : block_threads(threads);
     st->threads = nt;
+    int P = rare_baton_size(nt);
+    st->baton = P;
     unsigned maxG = 0, vcap = 2;
     for (long i = 0; i < from; i++)
         if (G[i] > maxG) maxG = G[i];
@@ -1320,7 +1555,7 @@ static int extend_rare(const Rule *R, uint16_t *G, long from, long to, int threa
              * where the loop re-chooses the mask */
             long end = to < next_check ? to : next_check;
             long long before = st->scan1 + st->scan2;
-            rc = rare_spec_run(&S, R, G, n, end, mask, &rare, &nrare, &cap, &maxG, &vcap, nt, &B, st);
+            rc = rare_spec_run(&S, R, G, n, end, mask, &rare, &nrare, &cap, &maxG, &vcap, nt, P, &B, st, progress, pctx);
             *pairs += st->scan1 + st->scan2 - before;
             n = end - 1;   /* the loop's n++ continues at end */
             continue;
@@ -1330,6 +1565,7 @@ static int extend_rare(const Rule *R, uint16_t *G, long from, long to, int threa
                             : grundy_brute(&S, R, G, n, pairs);
         if (active) *pairs += st->scan1 + st->scan2 - before;
         rc = store_value(&S, G, n, g, &maxG, &vcap);
+        if (progress && (n & 65535) == 65535) progress(n + 1, pctx);
         if (!rc && active && n >= 1 && rv_rare(g, mask)) {
             if (nrare == cap) {
                 long c = cap ? 2 * cap : 1024;
@@ -1767,6 +2003,20 @@ static int extend_device(const Device *D, const Rule *R, uint16_t *G, long from,
 }
 
 
+/** Progress state of compute() (for compute_progress()). */
+typedef struct {
+    long N;
+    Method method;
+    double t0;
+} ProgressCtx;
+
+/** Show "n = ... / N" on stderr (compute() only calls it when stderr is a terminal). */
+static void compute_progress(long n, void *ctx) {
+    const ProgressCtx *p = ctx;
+    fprintf(stderr, "\r  n = %ld / %ld  (%.0f%%, %s, %.0f s)   ", n, p->N, 100.0 * n / p->N,
+            method_name[p->method], now() - p->t0);
+}
+
 /**
  * @brief Compute G(0) .. G(N-1) (command-line program).
  *
@@ -1795,21 +2045,25 @@ static Result compute(const Rule *R, long N, Method method, int threads) {
         double t0 = now();
         int show = !quiet && isatty(2);
         res.threads = block_threads(threads);
+        ProgressCtx pc = {N, method, t0};
         for (long n = 0; n < N;) {
-            long e = n + (n < 65536 ? 65536 : n / 8);
+            /* the rare-value method in one call: every call drains its pipeline
+             * of speculation and check (one chunk speculated and one checked
+             * without overlap), which cost about 1 s of 6 for .6 to 10^7; it
+             * reports progress itself */
+            long e = method == METHOD_RARE ? N : n + (n < 65536 ? 65536 : n / 8);
             if (e > N) e = N;
             int rc = method == METHOD_VULKAN ? extend_device(VULKAN_DEVICE, R, G, n, e, &res.pairs)
                    : method == METHOD_ROCM   ? extend_device(ROCM_DEVICE, R, G, n, e, &res.pairs)
-                   : method == METHOD_RARE   ? extend_rare(R, G, n, e, threads, &res.pairs, &res.rare)
+                   : method == METHOD_RARE   ? extend_rare(R, G, n, e, threads, &res.pairs, &res.rare,
+                                                             show ? compute_progress : NULL, &pc)
                                              : extend_blocked(R, G, n, e, threads, &res.pairs);
             if (rc == -2) die("nim-value exceeds 65535; not supported");
             if (rc == -4 && method == METHOD_VULKAN) die("no usable GPU (Vulkan), or not built with -DOCTAL_VULKAN");
             if (rc == -4) die("no usable ROCm GPU, or not built with -DOCTAL_ROCM");
             if (rc) die("out of memory");
             n = e;
-            if (show)
-                fprintf(stderr, "\r  n = %ld / %ld  (%.0f%%, %s, %.0f s)   ", n, N, 100.0 * n / N,
-                        method_name[method], now() - t0);
+            if (show) compute_progress(n, &pc);
         }
         if (show) fprintf(stderr, "\r%78s\r", "");
         res.secs = now() - t0;
@@ -2539,7 +2793,7 @@ int octal_extend_rare(const char *code, uint16_t *G, long from, long to, int thr
     Rule R;
     if (parse_rule(code, &R)) return -1;
     long long pairs = 0;
-    return extend_rare(&R, G, from, to, threads, &pairs, NULL);
+    return extend_rare(&R, G, from, to, threads, &pairs, NULL, NULL, NULL);
 }
 
 /** See octal.h.  Fill G[from..to) with extend_device() on Vulkan.  Returns 0,
@@ -2768,9 +3022,9 @@ int main(int argc, char **argv) {
                         "+ %lld (witnesses), %lld full scans\n", res.rare.mask, res.rare.nrare,
                         res.rare.scan1, res.rare.scan2, res.rare.full);
             if (res.rare.speculated)
-                fprintf(g, "speculation     %lld values speculated (%lld with one byte per value), %lld chunks "
-                        "failed the check (a new rare value)\n", res.rare.speculated, res.rare.bytes,
-                        res.rare.restarts);
+                fprintf(g, "speculation     %lld values speculated (%lld with one byte per value) by a team of %d "
+                        "(baton passing), %lld chunks failed the check (a new rare value)\n", res.rare.speculated,
+                        res.rare.bytes, res.rare.baton, res.rare.restarts);
         }
         else
             fprintf(g, "time            %.2f s (%s)\n", res.secs, res.sparse ? "sparse-space" : "brute force");
