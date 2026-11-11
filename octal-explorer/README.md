@@ -17,7 +17,9 @@ uv run pytest             # 19 tests: C vs a pure-Python reference, known period
 uv run jupyter lab notebooks/explore_octal_games.ipynb
 ```
 
-The Python package rebuilds `liboctal.so` automatically when `octal.c` is newer.
+The Python package rebuilds `liboctal.so` automatically when `octal.c` is newer.  The C code
+is `octal.c` (the computation, also the library) and `octal_output.c` (the command-line
+program and its output files).
 
 ## Game codes
 

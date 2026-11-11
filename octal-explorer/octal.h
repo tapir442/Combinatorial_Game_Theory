@@ -4,7 +4,7 @@
  *
  * Build the library from octal.c with
  *
- *     cc -O3 -shared -fPIC -DOCTAL_NO_MAIN -o liboctal.so octal.c -lz -lm
+ *     cc -O3 -shared -fPIC -o liboctal.so octal.c -lz -lm
  *
  * or `make lib`.  The Python package `octalgames` loads it through ctypes.
  *

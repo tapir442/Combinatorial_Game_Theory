@@ -29,13 +29,14 @@ LIB     = python/octalgames/liboctal.so
 
 all: octal $(LIB)
 
-octal: octal.c octal.h $(wildcard octal_gpu_spv.h) $(ROCMOBJ)
-	$(CC) $(CFLAGS) $(OMPFLAGS) $(GPUFLAGS) -o $@ $< $(ROCMOBJ) $(LDLIBS) $(GPULIBS)
+# octal.c: computation; octal_output.c: command-line program and output files
+octal: octal.c octal_output.c octal.h octal_internal.h $(wildcard octal_gpu_spv.h) $(ROCMOBJ)
+	$(CC) $(CFLAGS) $(OMPFLAGS) $(GPUFLAGS) -o $@ octal.c octal_output.c $(ROCMOBJ) $(LDLIBS) $(GPULIBS)
 
 # shared library used by the Python package (octalgames)
 lib: $(LIB)
-$(LIB): octal.c octal.h $(wildcard octal_gpu_spv.h) $(ROCMOBJ)
-	$(CC) $(CFLAGS) $(OMPFLAGS) $(GPUFLAGS) -Wno-unused-function -shared -fPIC -DOCTAL_NO_MAIN -o $@ $< $(ROCMOBJ) $(LDLIBS) $(GPULIBS)
+$(LIB): octal.c octal.h octal_internal.h $(wildcard octal_gpu_spv.h) $(ROCMOBJ)
+	$(CC) $(CFLAGS) $(OMPFLAGS) $(GPUFLAGS) -Wno-unused-function -shared -fPIC -o $@ $< $(ROCMOBJ) $(LDLIBS) $(GPULIBS)
 
 # ROCm (HIP) kernel and host code, linked into octal and the library
 octal_rocm.o: octal_rocm.hip
@@ -63,8 +64,8 @@ test-rocm: octal
 	./octal 4.07 -n 60000 --rocm --check
 
 # Thread-safety: 8 threads at once under ThreadSanitizer, compared with a sequential run
-test-threads: tests/thread_test.c octal.c octal.h
-	$(CC) -O1 -g -fsanitize=thread -DOCTAL_NO_MAIN -Wno-unused-function -o /tmp/octal-thread-test tests/thread_test.c octal.c -lz -lm -lpthread
+test-threads: tests/thread_test.c octal.c octal.h octal_internal.h
+	$(CC) -O1 -g -fsanitize=thread -Wno-unused-function -o /tmp/octal-thread-test tests/thread_test.c octal.c -lz -lm -lpthread
 	TSAN_OPTIONS=halt_on_error=1 /tmp/octal-thread-test
 
 # Sanity checks: sparse and blocked vs brute force, known periods, thread safety

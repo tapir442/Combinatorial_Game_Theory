@@ -1,4 +1,4 @@
-"""ctypes binding to the C backend (octal.c compiled with -DOCTAL_NO_MAIN).
+"""ctypes binding to the C backend (octal.c, the computation half of the C program).
 
 The shared library is looked up next to this file.  If it is missing, or if
 octal.c or octal.h is newer than it, it is (re)compiled automatically with $CC (default cc).
@@ -50,7 +50,7 @@ def _build(src: Path, out: Path) -> None:
     system does not support."""
     cc = os.environ.get("CC", "cc")
     base = [cc, "-O3", "-march=native", "-std=c11", "-Wno-unused-function", "-shared", "-fPIC",
-            "-DOCTAL_NO_MAIN", "-o", str(out), str(src), "-lz", "-lm"]
+            "-o", str(out), str(src), "-lz", "-lm"]
     omp = ["-fopenmp"]
     vk = ["-DOCTAL_VULKAN", "-lvulkan"] if src.with_name("octal_gpu_spv.h").exists() else []
     rocm = _build_rocm(src, out)
@@ -81,7 +81,7 @@ def _load():
     path = Path(os.environ.get("OCTALGAMES_LIB", _HERE / "liboctal.so"))
     src = next((s for s in _SOURCES if s.exists()), None)
     if "OCTALGAMES_LIB" not in os.environ and src is not None:
-        deps = [src.with_name(f) for f in ("octal.h", "octal_gpu_spv.h", "octal_rocm.hip")]
+        deps = [src.with_name(f) for f in ("octal.h", "octal_internal.h", "octal_gpu_spv.h", "octal_rocm.hip")]
         newest = max([src.stat().st_mtime] + [d.stat().st_mtime for d in deps if d.exists()])
         if not path.exists() or newest > path.stat().st_mtime:
             _build(src, path)

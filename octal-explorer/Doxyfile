@@ -11,7 +11,7 @@ CREATE_SUBDIRS         = NO
 OUTPUT_LANGUAGE        = English
 
 #---------------------------------------------------------------- input
-INPUT                  = octal.h octal.c README.md
+INPUT                  = octal.h octal_internal.h octal.c octal_output.c README.md
 FILE_PATTERNS          = *.c *.h
 RECURSIVE              = NO
 USE_MDFILE_AS_MAINPAGE = README.md

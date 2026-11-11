@@ -5,7 +5,7 @@ The library is `octal.c` compiled without its `main` function:
 ```sh
 make lib
 # or by hand:
-cc -O3 -shared -fPIC -DOCTAL_NO_MAIN -o liboctal.so octal.c -lz -lm
+cc -O3 -shared -fPIC -o liboctal.so octal.c -lz -lm
 ```
 
 Include `octal.h` and link with `-loctal` (or load the `.so` dynamically, as the Python

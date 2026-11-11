@@ -1,6 +1,16 @@
 # C internals
 
-`octal.c` is one file of about 950 lines, in these sections.
+The C code is split in two:
+
+- `octal.c`: the **computation**: rules, all methods (brute force, sparse, blocked, GPU,
+  rare-value), period search, and the library API (`octal.h`).  The shared library is this
+  file alone.
+- `octal_output.c`: the **command-line program and its outputs**: PNG plots, `index.html`,
+  `summary.txt`, `values.csv`, and `main`.
+
+`octal_internal.h` declares what the two share (`Rule`, `Method`, `Result`, `Period`,
+`compute`, `find_period`, `parse_rule`, and small helpers); these functions are hidden in
+the shared library.  The sections below follow the code.
 
 ## Rules
 
@@ -141,7 +151,7 @@ parity) and avoids exactly this problem; it is implemented as `--rare`, see
 preperiod.  It applies the octal periodicity theorem when the rule is plain octal (see
 [Concepts](concepts.md#periods-proved-and-apparent)).
 
-## Graphics
+## Graphics (`octal_output.c`)
 
 - `Image` is a plain RGB buffer.  `png_save` writes it with zlib (`compress2`) and
   `crc32`, filter type 0 on every row.
@@ -155,5 +165,5 @@ preperiod.  It applies the octal periodicity theorem when the rule is plain octa
 ## Library entry points
 
 `octal_rule_name`, `octal_extend` and `octal_period` (see [Library API](c-api.md)) wrap
-`parse_rule`, `grundy_brute` and `find_period`.  Everything after
-`#ifndef OCTAL_NO_MAIN` (the usage text and `main`) is the command-line program.
+`parse_rule`, `grundy_brute` and `find_period`.  The command-line program (`usage`,
+`main`) is in `octal_output.c`.
