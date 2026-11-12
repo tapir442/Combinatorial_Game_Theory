@@ -7,6 +7,7 @@
 #   make project        Vivado project vivado/officers.xpr (Nexys A7-100T, folded core)
 #   make bit / program  bitstream in the project / load it over JTAG
 #   make board          run on the board and compare with octal (run_board.py)
+#   make run N=1e10     long run on the board without checking (display: highest value)
 # Vivado must be on PATH (source <install>/Vivado/settings64.sh).
 PART  ?= xc7vx690tffg1761-2
 MHZ   ?= 232
@@ -71,4 +72,9 @@ program: $(COMPAT)/libncurses.so.5
 board:
 	python3 run_board.py --n0 $(N0)
 
-.PHONY: model sim sim-folded synth impl clean project bit program board
+# long run on the board without checking (N values, 0 = until Ctrl-C)
+N ?= 1e10
+run:
+	python3 run_board.py --n0 $(N0) --no-check --total $(N)
+
+.PHONY: model sim sim-folded synth impl clean project bit program board run

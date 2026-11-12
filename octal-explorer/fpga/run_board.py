@@ -2,12 +2,19 @@
 """Drive the folded Officers core on the Nexys A7 over its USB-UART, check against octal.
 
     run_board.py [--port /dev/ttyUSB1] [--n0 50000] [--stream 100000] [--crc 10000000]
+    run_board.py --no-check [--total 1e10] [--block 1e9] [--n0 50000]
 
 1. 'I': read fold, clock, history depth.
 2. 'L': preload G(n0 - preload .. n0-1) (computed with octal --rare).
 3. 'S': stream --stream values back and compare each with octal.
 4. 'C': run --crc further values at full speed, then compare the CRC-32 (zlib, values as
    u16 little-endian) and the last value with octal; report the measured rate.
+
+--no-check: long runs without octal (only the preload comes from octal).  After the
+preload, 'C' commands of --block values each run until --total values are done
+(0 = until Ctrl-C), printing n, the CRC and last value of each block and the rate.
+The 7-segment display shows the highest nim-value so far.  The values are the
+speculation (no new rare values), which Grossman's computation confirms up to 1.4e14.
 Protocol: see nexys_a7_top.sv.  Needs read/write access to the port (group dialout).
 """
 import argparse
@@ -64,7 +71,12 @@ def main():
     ap.add_argument("--n0", type=int, default=50000)
     ap.add_argument("--stream", type=int, default=100000)
     ap.add_argument("--crc", type=int, default=10_000_000)
+    ap.add_argument("--no-check", action="store_true", help="long run without comparing with octal")
+    ap.add_argument("--total", type=float, default=0, help="--no-check: values to compute (0 = forever)")
+    ap.add_argument("--block", type=float, default=1e9, help="--no-check: values per 'C' command")
     args = ap.parse_args()
+    if args.no_check:
+        return long_run(args)
 
     fd = open_port(args.port)
     os.write(fd, b"I")
@@ -122,6 +134,48 @@ def main():
               f"{args.crc / secs / 1e6:.2f} M values/s (host round trip {time.time() - t:.2f} s)")
         if not ok:
             sys.exit(1)
+
+
+def board_info(fd):
+    os.write(fd, b"I")
+    tag, fold, mhz, depth, slots = struct.unpack("<cBHIH", read_exact(fd, 10, 2))
+    assert tag == b"I"
+    return fold, mhz, depth, slots
+
+
+def long_run(args):
+    block = int(args.block)
+    total = int(args.total)
+    if not 0 < block < 2**32:
+        sys.exit("--block must be between 1 and 4294967295")
+    fd = open_port(args.port)
+    fold, mhz, depth, slots = board_info(fd)
+    preload = depth + 2
+    if args.n0 < preload:
+        sys.exit(f"--n0 must be >= {preload}")
+    print(f"board: fold {fold}, {mhz} MHz -> {mhz / fold:.2f} M values/s; no check against octal")
+    pre = octal_values(args.n0)[args.n0 - preload:]
+    os.write(fd, b"L" + struct.pack("<I", len(pre)) + b"".join(struct.pack("<H", v) for v in pre))
+    assert read_exact(fd, 1, 5) == b"l"
+    print(f"loaded G({args.n0 - preload} .. {args.n0 - 1})")
+    n, t0 = args.n0, time.time()
+    try:
+        while total == 0 or n < args.n0 + total:
+            k = block if total == 0 else min(block, args.n0 + total - n)
+            os.write(fd, b"C" + struct.pack("<I", k))
+            tag, crc, cycles, last, err = struct.unpack("<cIQHB", read_exact(fd, 16, 60 + k / 1e6))
+            assert tag == b"c"
+            n += k
+            done, el = n - args.n0, time.time() - t0
+            eta = f", {(total - done) * el / done / 60:.1f} min left" if total else ""
+            print(f"n = {n:,}: block crc {crc:08x}, G({n - 1}) = {last}, err = {err}, "
+                  f"{k / (cycles / (mhz * 1e6)) / 1e6:.2f} M values/s, {done:,} values in {el:.0f} s{eta}",
+                  flush=True)
+            if err:
+                sys.exit("err: all 256 common values marked in this block -- the speculation failed here")
+    except KeyboardInterrupt:
+        print(f"\nstopped after G({n - 1}).  A 'C' command in flight still finishes on the board "
+              f"(LED 0 goes off, at most {block / (mhz / fold * 1e6):.0f} s); start the next run after that.")
 
 
 if __name__ == "__main__":

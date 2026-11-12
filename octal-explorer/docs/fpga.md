@@ -211,6 +211,24 @@ crc run: 10000000 values from n = 150000: crc 7186fe56 (octal 7186fe56), last 15
 The display then read **319**. That is the largest G(n) for n = 29,371 …
 10,149,999, and it first occurs at n = 1,274,955.
 
+**Long runs.** `make -C fpga run N=1e10` (or `run_board.py --no-check --total N
+--block 1e9`) runs N values without octal; `N=0` runs until Ctrl-C. Only the
+preload comes from octal. The host sends `C` commands of 10⁹ values each. It
+prints the CRC and the last value of each block, and the display shows the
+highest nim-value so far. Here is a test with 3 · 10⁸ values:
+
+```
+n = 100,050,000: block crc 59249092, G(100049999) = 145, err = 0, 25.00 M values/s, 100,000,000 values in 4 s
+n = 200,050,000: block crc bcf408c4, G(200049999) = 164, err = 0, 25.00 M values/s, 200,000,000 values in 8 s
+n = 300,050,000: block crc 8011f5a3, G(300049999) = 217, err = 0, 25.00 M values/s, 300,000,000 values in 12 s
+```
+
+`octal --rare` gives the same G(100,049,999) = 145. These values are the
+speculation, so they assume no new rare values. Grossman's computation confirms
+that assumption up to 1.4 · 10¹⁴. The board could not detect a new rare value
+itself, because that is the check (step 2). `err` only flags a heap where all 256
+common values are marked.
+
 The board stores nothing and computes only from the preload: the history it
 needs is the last 20,627 values, and those are sent by the host. Programming
 uses JTAG only (`make program`), so the design is gone after a power cycle.
@@ -289,6 +307,7 @@ make project    # vivado/officers.xpr: Nexys A7-100T, folded core + UART (create
 make bit        # synthesis, implementation, bitstream (build_bitstream.tcl)
 make program    # load it over JTAG (volatile)
 make board      # run_board.py: load, stream 100k, CRC 10^7, compare with octal
+make run N=1e10 # long run without checking (display: highest nim-value)
 ```
 
 `create_project.tcl` generates the cores and test vectors into `build/gen/`, so
@@ -320,7 +339,7 @@ reusing old results, in these cases:
 | `fpga/nexys_a7_top.sv`, `fpga/uart.sv`, `fpga/nexys_a7.xdc` | board top level, UART and FIFO, pins |
 | `fpga/create_project.tcl`, `build_bitstream.tcl`, `program.tcl` | Vivado project, bitstream, JTAG |
 | `fpga/make_vectors.py` | test vectors for the project's simulation sets |
-| `fpga/run_board.py` | host side: load, stream, CRC run, compare with octal |
+| `fpga/run_board.py` | host side: load, stream, CRC run, compare with octal; `--no-check` long runs |
 | `fpga/synth.tcl` | out-of-context synthesis (+ implementation) of the full core |
 | `fpga/Makefile` | `model`, `sim`, `sim-folded`, `synth`, `impl` (`PART=`, `MHZ=`), `project`, `bit`, `program`, `board` |
 
