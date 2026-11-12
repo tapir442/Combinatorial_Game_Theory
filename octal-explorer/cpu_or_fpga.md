@@ -7,7 +7,11 @@ Status:
   `octal_extend_gpu()` / `octal_extend_rocm()`, Python `method="gpu"` / `"rocm"`.  The only GPU
   available was the Ryzen 9 7900X iGPU (2 CUs): 23.3 s (Vulkan) and 20.8 s (ROCm, wave64) for the
   same run, about 3.5× one core but slower than 24 CPU threads.  Not yet measured on a discrete GPU.
-- **FPGA (section 3): idea only.**  Its figures are back-of-envelope estimates, not measurements.
+- **FPGA (section 3): idea only for the general blocked method.**  Its figures are back-of-envelope
+  estimates.  For Officers (.6), Grossman's speculation core (one value per clock) exists in
+  `fpga/`: simulated, and placed and routed at 232 MHz on a Virtex-7 690T (not run on a board).
+  A folded version (one value per 8 clocks) runs on a Nexys A7-100T at 200 MHz, 25 M values/s, and
+  matches octal on 1.01e7 values; see docs/fpga.md.
 
 ## Why it does not parallelise naively
 

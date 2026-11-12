@@ -9,3 +9,5 @@ out_*/
 site/
 doxygen/
 *.o
+fpga/build/
+fpga/vivado/

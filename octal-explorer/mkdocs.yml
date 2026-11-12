@@ -27,6 +27,7 @@ nav:
       - Library API: c-api.md
       - Internals: c-internals.md
       - Rare-value algorithm: rare-values.md
+      - Officers on an FPGA: fpga.md
   - Python:
       - User guide: python-guide.md
       - API reference: python-api.md
