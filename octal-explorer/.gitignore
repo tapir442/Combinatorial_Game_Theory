@@ -11,3 +11,7 @@ doxygen/
 *.o
 fpga/build/
 fpga/vivado/
+# Vitis / Vivado GUI workspace in fpga/ (separate from vivado/officers.xpr, which create_project.tcl recreates)
+fpga/.gitignore
+fpga/_ide/
+fpga/fpga.*
