@@ -174,6 +174,7 @@ USB port, and a command FSM. All numbers are little-endian:
 | `L` n:u32, n × u16 | load G(n0−n … n0−1); the last two go through full periods → `l` |
 | `S` n:u32 | compute n values and stream each as u16, then `s` err:u8 |
 | `C` n:u32 | compute n values at full speed → `c` crc:u32 cycles:u64 last:u16 err:u8 max:u16 at:u32 (CRC-32 as zlib, over the values as u16; max = highest value of the block, first at value number at, from 0) |
+| `D` | dump the history → 20,627 × u16, G(n−20,627 … n−1) oldest first, then `d`; S and C continue afterwards |
 
 `S` and `C` continue from where the previous command stopped. The LEDs show:
 
@@ -233,9 +234,39 @@ Each `c` reply also carries the block's maximum and where it first occurs, so a
 long run logs every new overall maximum, e.g. `new maximum: G(19,739,543) = 325`
 (confirmed by octal: the first 325 and the maximum up to there).
 
-The board stores nothing and computes only from the preload: the history it
-needs is the last 20,627 values, and those are sent by the host. Programming
-uses JTAG only (`make program`), so the design is gone after a power cycle.
+**Checkpoints.** The board needs only its history, the last 20,627 values. `D`
+dumps it in 0.2 s. The history shift register is rotated once around through the
+fast-load path: the core outputs its oldest entry (`tail`), and the top feeds it
+back in, 3 clocks per value. The engine is frozen meanwhile, and the history ends
+as it started, so a run continues after a dump. `L` with any two values in front
+of a dump restores the state (the first two only pass through). In check mode,
+`run_board.py` compares the dump with octal. It then runs 10⁶ values twice, once
+straight after the dump and once after reloading it, and both CRCs must match octal.
+
+With `--no-check`, the state (next n, history, maximum so far and its heap) is
+saved to `fpga/build/board-state.bin` (41 KB) after every block. The next run
+continues from it, unless `--fresh` is given, so runs can go past where octal can
+produce the preload. The first Ctrl-C stops after the block in flight and saves;
+a second one aborts. `--checkpoint DIR` keeps a copy per block.
+
+**Service.** `fpga/officers-board.service` (systemd user service; `make -C fpga
+service-install`) runs `fpga/board_service.sh`. That script keeps the run going:
+
+* If no board is present, it retries every 5 minutes.
+* If the board does not answer (e.g. after a power cycle), it programs it over
+  JTAG.
+* It runs `run_board.py --no-check --total 0` from the state file.
+* After an error or an unplugged board, it retries in 5 minutes.
+* After `err` (exit 3), it stops for good.
+
+`systemctl --user stop officers-board` sends SIGINT, so the block finishes and the
+state is saved. Output goes to the journal and to `fpga/build/board-run.log`. The
+serial port needs permanent access (group `dialout`, or a udev rule such as
+`SUBSYSTEM=="tty", ATTRS{serial}=="210292BF7051", GROUP="plugdev", MODE="0660"`),
+because a manual ACL is lost when the board is replugged.
+
+Programming uses JTAG only (`make program`), so the design is gone after a power
+cycle.
 
 ### Clock
 
@@ -387,7 +418,8 @@ reusing old results, in these cases:
 | `fpga/nexys_a7_top.sv`, `fpga/uart.sv`, `fpga/nexys_a7.xdc` | board top level, UART and FIFO, pins |
 | `fpga/create_project.tcl`, `build_bitstream.tcl`, `program.tcl` | Vivado project, bitstream, JTAG |
 | `fpga/make_vectors.py` | test vectors for the project's simulation sets |
-| `fpga/run_board.py` | host side: load, stream, CRC run, compare with octal; `--no-check` long runs |
+| `fpga/run_board.py` | host side: load, stream, CRC run, dump, compare with octal; `--no-check` long runs with saved state |
+| `fpga/board_service.sh`, `fpga/officers-board.service` | systemd user service that keeps the long run going |
 | `fpga/witness_depth.c` | step-2 witness depth per heap (CPU), for sizing a check on the FPGA |
 | `fpga/synth.tcl` | out-of-context synthesis (+ implementation) of the full core |
 | `fpga/Makefile` | `model`, `sim`, `sim-folded`, `synth`, `impl` (`PART=`, `MHZ=`), `project`, `bit`, `program`, `board` |

@@ -22,6 +22,10 @@ Timing, with H[j] = G(m-1-j) after the shift that ends period m-1:
   chunks (phase 0), value lookup at phase 1 of period m+2, where G(m+2) is
   shifted into H.  So P >= D + F = 8.
 
+History dump: the oldest entry comes out as `tail`.  Fast-loading it back
+(ld_fast_d with ld_data = its decoded value) DEPTH times rotates the history once
+around; the engine is frozen meanwhile, so the core continues as before.
+
 Stalls: the data path runs every clock.  A window phase is *valid* only in the
 clock in which the phase counter moves on (ce); repeats issued while stalled
 are ignored by the accumulator.  The only enables with a large fan-out are the
@@ -78,7 +82,8 @@ def emit(out, rare, G, P):
     w("    output wire       shifting,  // this clock shifts a value into the history (advance at phase 1)")
     w("    output reg        out_valid, // one clock, after a computed value")
     w("    output reg  [8:0] out_data,")
-    w("    output reg        err        // sticky: all 256 common values marked")
+    w("    output reg        err,       // sticky: all 256 common values marked")
+    w("    output reg  [8:0] tail       // H[DEPTH-1] (encoded) one clock late: for dumping the history")
     w(");")
     w(f"localparam int P = {P};")
     w(f"localparam int S = {S};")
@@ -115,6 +120,7 @@ def emit(out, rare, G, P):
     w("    H[0] <= (ldf_q | ld_slow) ? ld_enc : g_enc;")
     w("    for (int j = 1; j < DEPTH; j++) H[j] <= H[j-1];")
     w("end")
+    w("always @(posedge clk) tail <= H[DEPTH-1];")
     w("")
     w("// ---- stage 1: slot muxes (tap by window phase) and XOR with G(a); valid/first/last tags ----")
     w("reg [8:0] v1 [0:S-1];")

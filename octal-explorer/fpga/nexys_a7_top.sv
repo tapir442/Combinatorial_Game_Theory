@@ -9,7 +9,11 @@
 //                            cycles:u64 last:u16 err:u8 max:u16 at:u32
 //                            (crc = CRC-32 (zlib) of the values as u16 LE; max = the
 //                            block's highest value, first at the at-th value, from 0)
-// S and C continue from where the previous command stopped.
+//   'D'                      dump the history: DEPTH x u16, G(n-DEPTH .. n-1) for the
+//                            next n, oldest first, then 'd'.  The history is rotated
+//                            once around, so S and C continue afterwards; 'L' with two
+//                            more values in front (any) and these restores the state.
+// S, C and D continue from where the previous command stopped.
 // LEDs: 0 busy, 1 err, 2 MMCM locked, 15..8 progress (top bits of the count).
 // 7-segment display: the highest nim-value so far (preloaded or computed), in decimal;
 // cleared by each 'L'.
@@ -65,10 +69,13 @@ module nexys_a7_top #(
     reg        ce_d, ld_fast_d, ld_slow, ld_fast_q;
     reg  [8:0] ld_data;
     wire       shifting, out_valid, err;
-    wire [8:0] out_data;
+    wire [8:0] out_data, tail;
     officers_folded u_core (.clk(clk), .rst(rst), .ce_d(ce_d), .ld_fast_d(ld_fast_d),
                             .ld_slow(ld_slow), .ld_data(ld_data), .shifting(shifting),
-                            .out_valid(out_valid), .out_data(out_data), .err(err));
+                            .out_valid(out_valid), .out_data(out_data), .err(err),
+                            .tail(tail));
+    // the oldest history entry as a value: bit 8 from the common flag (odd parity = common)
+    wire [8:0] tail_v = {tail[8] ^ ^(tail[7:0] & 8'hEE), tail[7:0]};
 
     // ---- CRC-32 (reflected, poly EDB88320) of two bytes ----
     function automatic [31:0] crc16(input [31:0] c, input [15:0] d);
@@ -78,7 +85,7 @@ module nexys_a7_top #(
     endfunction
 
     // ---- command FSM ----
-    typedef enum logic [3:0] {IDLE, ARG, LOAD_LO, LOAD_HI, LOAD_PUT, RUN, REPLY} st_t;
+    typedef enum logic [3:0] {IDLE, ARG, LOAD_LO, LOAD_HI, LOAD_PUT, RUN, REPLY, D_ROT, D_LO, D_HI} st_t;
     st_t st;
     reg [7:0]  cmd;
     reg [31:0] n, left, done;
@@ -117,6 +124,7 @@ module nexys_a7_top #(
         LOAD_HI:  begin ld_fast_d = rx_v && l_gt2; ce_d = rx_v && !l_gt2; end
         LOAD_PUT: ce_d = !shifting;
         RUN:      ce_d = room_q && (l_gt1 || (l_eq1 && !shifting));
+        D_ROT:    ld_fast_d = l_nz && rep_room_q;      // shift the oldest value back in
         default:  ;
         endcase
     end
@@ -141,6 +149,8 @@ module nexys_a7_top #(
                 {rep[7], rep[6], rep[5], rep[4]} <= 32'(`FOLD_DEPTH);
                 {rep[9], rep[8]} <= 16'(`FOLD_S);
                 rep_n <= 10; rep_i <= 0; st <= REPLY;
+            end else if (rx_d == "D") begin
+                left <= 32'(`FOLD_DEPTH); l_nz <= 1'b1; st <= D_ROT;
             end else if (rx_d == "L" || rx_d == "S" || rx_d == "C") st <= ARG;
         end
         ARG: if (rx_v) begin
@@ -198,6 +208,15 @@ module nexys_a7_top #(
                 end
                 rep_i <= 0; st <= REPLY;
             end
+        end
+        // dump: one rotation step per value; tail is H[DEPTH-1] as of the previous clock, and
+        // the last shift was 3 clocks ago, so it is the entry the shift in the next clock moves out
+        D_ROT: if (!l_nz) begin rep[0] <= "d"; rep_n <= 1; rep_i <= 0; st <= REPLY; end
+               else if (rep_room_q) begin ld_data <= tail_v; st <= D_LO; end
+        D_LO:  begin q_wr <= 1'b1; q_d <= ld_data[7:0]; st <= D_HI; end
+        D_HI:  begin
+            q_wr <= 1'b1; q_d <= {7'd0, ld_data[8]};
+            left <= left - 1; l_nz <= left != 1; st <= D_ROT;
         end
         REPLY: if (rep_i == rep_n) st <= IDLE;
                else if (rep_room_q) begin q_wr <= 1'b1; q_d <= rep[rep_i]; rep_i <= rep_i + 1; end

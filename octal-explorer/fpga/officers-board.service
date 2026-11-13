@@ -1,0 +1,20 @@
+# systemd user service: keeps the Officers long run on the Nexys A7 going.
+#   make -C fpga service-install      (links this file, enables it; starts at login / boot with linger)
+#   systemctl --user start|stop|status officers-board
+#   journalctl --user -u officers-board -f      (also fpga/build/board-run.log)
+# Stopping sends SIGINT: run_board.py finishes the block in flight (at most ~40 s),
+# saves fpga/build/board-state.bin and exits; the next start continues from there.
+[Unit]
+Description=Officers (.6) speculation run on the Nexys A7 FPGA board
+
+[Service]
+Type=simple
+ExecStart=%h/research-disk/Combinatorial_Game_Theory/octal-explorer/fpga/board_service.sh
+KillSignal=SIGINT
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=300
+RestartPreventExitStatus=3
+
+[Install]
+WantedBy=default.target
