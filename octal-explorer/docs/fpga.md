@@ -173,7 +173,7 @@ USB port, and a command FSM. All numbers are little-endian:
 | `I` | `I` fold:u8 mhz:u16 depth:u32 slots:u16 |
 | `L` n:u32, n × u16 | load G(n0−n … n0−1); the last two go through full periods → `l` |
 | `S` n:u32 | compute n values and stream each as u16, then `s` err:u8 |
-| `C` n:u32 | compute n values at full speed → `c` crc:u32 cycles:u64 last:u16 err:u8 (CRC-32 as zlib, over the values as u16) |
+| `C` n:u32 | compute n values at full speed → `c` crc:u32 cycles:u64 last:u16 err:u8 max:u16 at:u32 (CRC-32 as zlib, over the values as u16; max = highest value of the block, first at value number at, from 0) |
 
 `S` and `C` continue from where the previous command stopped. The LEDs show:
 

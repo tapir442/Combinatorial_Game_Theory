@@ -6,8 +6,9 @@
 //                            periods (ld_slow) so the pipeline is primed  -> 'l'
 //   'S' n:u32                compute n values and stream each as u16       -> ... 's' err:u8
 //   'C' n:u32                compute n values at full speed                -> 'c' crc:u32
-//                            cycles:u64 last:u16 err:u8
-//                            (crc = CRC-32 (zlib) of the values as u16 LE)
+//                            cycles:u64 last:u16 err:u8 max:u16 at:u32
+//                            (crc = CRC-32 (zlib) of the values as u16 LE; max = the
+//                            block's highest value, first at the at-th value, from 0)
 // S and C continue from where the previous command stopped.
 // LEDs: 0 busy, 1 err, 2 MMCM locked, 15..8 progress (top bits of the count).
 // 7-segment display: the highest nim-value so far (preloaded or computed), in decimal;
@@ -92,7 +93,11 @@ module nexys_a7_top #(
     reg        room_q, rep_room_q;      // FIFO space, registered (the FIFO has ample margin)
     reg        all_out;                 // done == n, registered
     reg [8:0]  last;
-    reg [7:0]  rep [0:15];
+    // block maximum: from registered copies of the output (off the critical path)
+    reg        bv_q;
+    reg [8:0]  bval_q, bmax;
+    reg [31:0] bcnt, bmax_at;
+    reg [7:0]  rep [0:21];
     reg [4:0]  rep_n, rep_i;
 
     reg hi_pending = 0, hi_bit;          // high byte of a streamed value, one clock later
@@ -124,6 +129,8 @@ module nexys_a7_top #(
         all_out <= (done == n);              // one clock late; done only grows during a run
         cyc_hi <= cyc_hi + cyc_c;            // (ARG below overrides these on a new command)
         cyc_c <= 1'b0;
+        bv_q <= (st == RUN) && out_valid;
+        bval_q <= out_data;
         if (rst) begin
             st <= IDLE;
         end else case (st)
@@ -143,6 +150,7 @@ module nexys_a7_top #(
                 left <= arg;
                 l_gt2 <= arg > 2; l_gt1 <= arg > 1; l_eq1 <= arg == 1; l_nz <= arg != 0;
                 done <= 0; crc <= 32'hFFFFFFFF; cyc_lo <= 0; cyc_hi <= 0; cyc_c <= 1'b0;
+                bcnt <= 0; bmax <= 0; bmax_at <= 0;
                 st <= (cmd == "L") ? LOAD_LO : RUN;
             end
         end
@@ -161,6 +169,10 @@ module nexys_a7_top #(
             l_gt2 <= 1'b0; l_gt1 <= 1'b0; l_eq1 <= left == 2; l_nz <= left == 2;
         end
         RUN: begin
+            if (bv_q) begin                      // the last value lands 1 clock before all_out
+                bcnt <= bcnt + 1;
+                if (bval_q > bmax) begin bmax <= bval_q; bmax_at <= bcnt; end
+            end
             if (l_nz) {cyc_c, cyc_lo} <= {1'b0, cyc_lo} + 33'd1;
             if (shifting) begin
                 left <= left - 1;
@@ -180,7 +192,9 @@ module nexys_a7_top #(
                     {rep[12], rep[11], rep[10], rep[9], rep[8], rep[7], rep[6], rep[5]} <= {cyc_hi, cyc_lo};
                     {rep[14], rep[13]} <= {7'd0, last};
                     rep[15] <= {7'd0, err};
-                    rep_n <= 16;
+                    {rep[17], rep[16]} <= {7'd0, bmax};
+                    {rep[21], rep[20], rep[19], rep[18]} <= bmax_at;
+                    rep_n <= 22;
                 end
                 rep_i <= 0; st <= REPLY;
             end

@@ -8,11 +8,13 @@
 2. 'L': preload G(n0 - preload .. n0-1) (computed with octal --rare).
 3. 'S': stream --stream values back and compare each with octal.
 4. 'C': run --crc further values at full speed, then compare the CRC-32 (zlib, values as
-   u16 little-endian) and the last value with octal; report the measured rate.
+   u16 little-endian), the last value and the block maximum (value and first position)
+   with octal; report the measured rate.
 
 --no-check: long runs without octal (only the preload comes from octal).  After the
 preload, 'C' commands of --block values each run until --total values are done
-(0 = until Ctrl-C), printing n, the CRC and last value of each block and the rate.
+(0 = until Ctrl-C), printing n, the CRC, last value and maximum of each block and the rate,
+and a line for each new overall maximum with the heap where it first occurs.
 The 7-segment display shows the highest nim-value so far.  The values are the
 speculation (no new rare values), which Grossman's computation confirms up to 1.4e14.
 Protocol: see nexys_a7_top.sv.  Needs read/write access to the port (group dialout).
@@ -28,6 +30,11 @@ import time
 import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+# 'C' reply: tag crc cycles last err max at
+C_FMT = "<cIQHBHI"
+C_LEN = struct.calcsize(C_FMT)
 
 
 def open_port(path, baud=2_000_000):
@@ -122,13 +129,17 @@ def main():
     if args.crc:
         t = time.time()
         os.write(fd, b"C" + struct.pack("<I", args.crc))
-        r = read_exact(fd, 16, 60 + args.crc / 1e6)
-        tag, crc, cycles, last, err = struct.unpack("<cIQHB", r)
+        r = read_exact(fd, C_LEN, 60 + args.crc / 1e6)
+        tag, crc, cycles, last, err, bmax, at = struct.unpack(C_FMT, r)
         assert tag == b"c", r
-        ref = zlib.crc32(struct.pack(f"<{args.crc}H", *G[n:n + args.crc]))
-        ok = crc == ref and last == G[n + args.crc - 1] and not err
+        blk = G[n:n + args.crc]
+        ref = zlib.crc32(struct.pack(f"<{args.crc}H", *blk))
+        rmax = max(blk)
+        ok = (crc == ref and last == blk[-1] and not err and bmax == rmax
+              and at == blk.index(rmax))
         print(f"crc run: {args.crc} values from n = {n}: crc {crc:08x} (octal {ref:08x}), "
-              f"last {last} (octal {G[n + args.crc - 1]}), err = {err} -> {'OK' if ok else 'MISMATCH'}")
+              f"last {last} (octal {blk[-1]}), max G({n + at}) = {bmax} "
+              f"(octal G({n + blk.index(rmax)}) = {rmax}), err = {err} -> {'OK' if ok else 'MISMATCH'}")
         secs = cycles / (mhz * 1e6)
         print(f"  {cycles} cycles = {secs * 1e3:.1f} ms at {mhz} MHz -> "
               f"{args.crc / secs / 1e6:.2f} M values/s (host round trip {time.time() - t:.2f} s)")
@@ -159,16 +170,21 @@ def long_run(args):
     assert read_exact(fd, 1, 5) == b"l"
     print(f"loaded G({args.n0 - preload} .. {args.n0 - 1})")
     n, t0 = args.n0, time.time()
+    gmax = max(pre)
+    print(f"maximum of the preload: {gmax}")
     try:
         while total == 0 or n < args.n0 + total:
             k = block if total == 0 else min(block, args.n0 + total - n)
             os.write(fd, b"C" + struct.pack("<I", k))
-            tag, crc, cycles, last, err = struct.unpack("<cIQHB", read_exact(fd, 16, 60 + k / 1e6))
+            tag, crc, cycles, last, err, bmax, at = struct.unpack(C_FMT, read_exact(fd, C_LEN, 60 + k / 1e6))
             assert tag == b"c"
+            if bmax > gmax:
+                gmax = bmax
+                print(f"new maximum: G({n + at:,}) = {bmax}", flush=True)
             n += k
             done, el = n - args.n0, time.time() - t0
             eta = f", {(total - done) * el / done / 60:.1f} min left" if total else ""
-            print(f"n = {n:,}: block crc {crc:08x}, G({n - 1}) = {last}, err = {err}, "
+            print(f"n = {n:,}: block crc {crc:08x}, G({n - 1}) = {last}, max {bmax}, err = {err}, "
                   f"{k / (cycles / (mhz * 1e6)) / 1e6:.2f} M values/s, {done:,} values in {el:.0f} s{eta}",
                   flush=True)
             if err:
