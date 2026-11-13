@@ -229,6 +229,10 @@ that assumption up to 1.4 · 10¹⁴. The board could not detect a new rare valu
 itself, because that is the check (step 2). `err` only flags a heap where all 256
 common values are marked.
 
+Each `c` reply also carries the block's maximum and where it first occurs, so a
+long run logs every new overall maximum, e.g. `new maximum: G(19,739,543) = 325`
+(confirmed by octal: the first 325 and the maximum up to there).
+
 The board stores nothing and computes only from the preload: the history it
 needs is the last 20,627 values, and those are sent by the host. Programming
 uses JTAG only (`make program`), so the design is gone after a power cycle.
@@ -290,6 +294,11 @@ chip can expect somewhere around 200–250 MHz at best.
   FPGA as well (step 2 needs random access to all of G, i.e. DDR), or the FPGA
   only *searches*: it runs ahead, finds candidates (e.g. a period match), and
   the CPU confirms just those.
+* **A split check does not fit.** The idea was to let the FPGA check each heap
+  against the first K common heaps (the same tap structure as the speculation
+  core), and to hand only the heaps it cannot settle to the PC. That only
+  pays off if the step-2 witnesses are shallow, and for Officers they are not
+  (below).
 * **Host interface.** The UART (2 Mbaud) is enough for loading, CRC runs and
   spot checks. It is not enough to stream every value (about 100k values/s).
   The full core would need PCIe/DMA (1 byte per value: about 230 MB/s).
@@ -298,6 +307,45 @@ chip can expect somewhere around 200–250 MHz at best.
   mask without the terms a = 0, 1 (two cycles ahead). Then G(n) is the first of
   them that is neither G(n−1) nor G(n−2) (r₁ = G(1) = 0). The OR tree would
   also need a fourth stage. Both changes are untried.
+
+### Witness depth
+
+`fpga/witness_depth.c` recomputes G as `octal --rare` does (its CRC matches octal up
+to 10⁸). For each heap n it records the **witness depth**: the pair position a at which
+step 2 finds the last missing rare value below the speculated value. Hence a split
+check with K taps settles exactly the heaps of depth ≤ K.
+
+```
+gcc -O3 -march=native -o build/witness_depth witness_depth.c
+build/witness_depth 1e8       # 8.5 min
+```
+
+| n | heaps | mean | max (at n) | > 1,000 | > 4,096 | > 8,192 | > 16,384 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 5·10⁴ – 10⁵ | 5·10⁴ | 2,757 | 38,392 (95,652) | 90 % | 19 % | 0.26 % | 0.002 % |
+| 10⁵ – 10⁶ | 9·10⁵ | 2,753 | 45,131 (459,575) | 90 % | 19 % | 0.24 % | 0.004 % |
+| 10⁶ – 10⁷ | 9·10⁶ | 2,747 | 431,340 (1,697,097) | 90 % | 19 % | 0.23 % | 0.005 % |
+| 10⁷ – 10⁸ | 9·10⁷ | 2,749 | 615,713 (14,309,759) | 90 % | 19 % | 0.23 % | 0.004 % |
+
+* **The bulk is stationary.** The mean (about 2,750, the same as octal's step-2 pair count) and
+  the shares do not change with n.
+* **The tail grows.** The deepest witness grows from 45k below 10⁶ to 616k at
+  n ≈ 1.4 · 10⁷.
+
+For the Nexys A7 this means:
+
+* Small K is useless: with K = 1,000, 90 % of the heaps go to the PC.
+* Flagging 0.2 % takes about 8,000 taps. That is 5 times the 1,584-tap core, which
+  already uses 64 % of the LUTs, so it fits only with about 5 times the folding
+  (≈ 5 M values/s).
+* Even then the PC would have to finish 10–60k heaps/s. Each of those needs values
+  up to 600k heap sizes back, far beyond the board's 20,627-value history and even
+  beyond its whole block RAM (about 540k 9-bit values), and the UART carries about
+  100k values/s.
+
+So verification stays on the CPU (`octal --rare`; Grossman's verified range is
+1.4 · 10¹⁴). The board stays a speculation and search engine: long runs, maxima,
+and next a period search, which needs no witnesses.
 
 ## Vivado project
 
@@ -340,6 +388,7 @@ reusing old results, in these cases:
 | `fpga/create_project.tcl`, `build_bitstream.tcl`, `program.tcl` | Vivado project, bitstream, JTAG |
 | `fpga/make_vectors.py` | test vectors for the project's simulation sets |
 | `fpga/run_board.py` | host side: load, stream, CRC run, compare with octal; `--no-check` long runs |
+| `fpga/witness_depth.c` | step-2 witness depth per heap (CPU), for sizing a check on the FPGA |
 | `fpga/synth.tcl` | out-of-context synthesis (+ implementation) of the full core |
 | `fpga/Makefile` | `model`, `sim`, `sim-folded`, `synth`, `impl` (`PART=`, `MHZ=`), `project`, `bit`, `program`, `board` |
 
