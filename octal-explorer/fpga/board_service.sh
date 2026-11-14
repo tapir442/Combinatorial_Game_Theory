@@ -33,7 +33,9 @@ pause() {
 program() {
     say "board does not answer: programming it over JTAG"
     (
-        source "$VIVADO_SETTINGS" >/dev/null 2>&1 || exit 1
+        # the Xilinx settings scripts use unset variables (PYTHONPATH, ...): no set -u here
+        set +u
+        source "$VIVADO_SETTINGS" >/dev/null || { echo "ERROR: cannot source $VIVADO_SETTINGS"; exit 1; }
         export LD_LIBRARY_PATH=$here/build/compat:${LD_LIBRARY_PATH:-}
         cd "$here" && vivado -mode batch -nojournal -nolog -source program.tcl
     ) > "$here/build/board-program.log" 2>&1

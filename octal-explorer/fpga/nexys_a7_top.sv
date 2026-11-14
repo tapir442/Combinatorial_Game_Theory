@@ -13,10 +13,12 @@
 //                            next n, oldest first, then 'd'.  The history is rotated
 //                            once around, so S and C continue afterwards; 'L' with two
 //                            more values in front (any) and these restores the state.
+//   'M' v:u32                raise the display maximum to v (the host's maximum of the
+//                            run so far, after an 'L')                       -> 'm'
 // S, C and D continue from where the previous command stopped.
 // LEDs: 0 busy, 1 err, 2 MMCM locked, 15..8 progress (top bits of the count).
 // 7-segment display: the highest nim-value so far (preloaded or computed), in decimal;
-// cleared by each 'L'.
+// cleared by each 'L', raised by 'M'.
 `include "folded_info.svh"   // FOLD_P, FOLD_S, FOLD_DEPTH (gen_folded.py)
 `default_nettype none
 module nexys_a7_top #(
@@ -106,6 +108,8 @@ module nexys_a7_top #(
     reg [31:0] bcnt, bmax_at;
     reg [7:0]  rep [0:21];
     reg [4:0]  rep_n, rep_i;
+    reg        gset = 1'b0;             // 'M': raise gmax to gset_v
+    reg [8:0]  gset_v;
 
     reg hi_pending = 0, hi_bit;          // high byte of a streamed value, one clock later
     always @(posedge clk) begin
@@ -131,6 +135,7 @@ module nexys_a7_top #(
 
     always @(posedge clk) begin
         q_wr <= 1'b0;
+        gset <= 1'b0;
         ld_fast_q <= ld_fast_d;
         room_q <= (cmd == "C") || (f_cnt < 9'd240);
         rep_room_q <= f_cnt < 9'd250;
@@ -151,7 +156,7 @@ module nexys_a7_top #(
                 rep_n <= 10; rep_i <= 0; st <= REPLY;
             end else if (rx_d == "D") begin
                 left <= 32'(`FOLD_DEPTH); l_nz <= 1'b1; st <= D_ROT;
-            end else if (rx_d == "L" || rx_d == "S" || rx_d == "C") st <= ARG;
+            end else if (rx_d == "L" || rx_d == "S" || rx_d == "C" || rx_d == "M") st <= ARG;
         end
         ARG: if (rx_v) begin
             n <= arg;
@@ -161,7 +166,10 @@ module nexys_a7_top #(
                 l_gt2 <= arg > 2; l_gt1 <= arg > 1; l_eq1 <= arg == 1; l_nz <= arg != 0;
                 done <= 0; crc <= 32'hFFFFFFFF; cyc_lo <= 0; cyc_hi <= 0; cyc_c <= 1'b0;
                 bcnt <= 0; bmax <= 0; bmax_at <= 0;
-                st <= (cmd == "L") ? LOAD_LO : RUN;
+                if (cmd == "M") begin
+                    gset <= 1'b1; gset_v <= arg[8:0];
+                    rep[0] <= "m"; rep_n <= 1; rep_i <= 0; st <= REPLY;
+                end else st <= (cmd == "L") ? LOAD_LO : RUN;
             end
         end
         LOAD_LO: if (!l_nz) begin rep[0] <= "l"; rep_n <= 1; rep_i <= 0; st <= REPLY; end
@@ -236,6 +244,7 @@ module nexys_a7_top #(
         g_new_q <= g_new;
         g_val_q <= g_val;
         if (rst || (st == IDLE && rx_v && rx_d == "L")) gmax <= 9'd0;
+        else if (gset && gset_v > gmax) gmax <= gset_v;
         else if (g_new_q && g_val_q > gmax) gmax <= g_val_q;
     end
     seg7_dec3 u_seg (.clk(clk), .value(gmax), .seg(SEG), .dp(DP), .an(AN));

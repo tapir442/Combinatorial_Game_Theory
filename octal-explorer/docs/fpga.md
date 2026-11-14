@@ -184,7 +184,9 @@ USB port, and a command FSM. All numbers are little-endian:
 * 15–8: progress
 
 The 7-segment display shows the **highest nim-value so far**, preloaded or
-computed, in decimal. Each `L` clears it.
+computed, in decimal. Each `L` clears it; `M v` (reply `m`) raises it to v. After
+a reload the board only sees the 20627-value window, so `run_board.py --no-check`
+sends the run's maximum from the state file with `M`.
 
 `run_board.py` drives all of this and checks each step against `octal --rare`.
 With v2 at 200 MHz:

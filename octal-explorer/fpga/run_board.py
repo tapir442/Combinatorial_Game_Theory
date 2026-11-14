@@ -95,6 +95,17 @@ def load(fd, vals):
     assert read_exact(fd, 1, 5) == b"l"
 
 
+def set_display_max(fd, g):
+    """'M': show the run's maximum on the 7-segment display (an 'L' clears it)."""
+    os.write(fd, b"M" + struct.pack("<I", g))
+    try:
+        ok = read_exact(fd, 1, 2) == b"m"
+    except TimeoutError:
+        ok = False
+    if not ok:
+        print("note: the board has no 'M' (older bitstream); its display shows the window's maximum")
+
+
 def run_block(fd, k):
     """'C' k: (crc, cycles, last, err, max, at)."""
     os.write(fd, b"C" + struct.pack("<I", k))
@@ -273,6 +284,7 @@ def long_run(args):
         gmax_n = G.index(gmax)
         print(f"starting at n = {n0:,} with octal's values; maximum so far G({gmax_n:,}) = {gmax}")
     load(fd, pre)
+    set_display_max(fd, gmax)
     os.makedirs(os.path.dirname(os.path.abspath(args.state)), exist_ok=True)
     if args.checkpoint:
         os.makedirs(args.checkpoint, exist_ok=True)
@@ -299,8 +311,10 @@ def long_run(args):
             n += k
             done, el = n - n0, time.time() - t0
             eta = f", {(total - done) * el / done / 60:.1f} min left" if total else ""
-            print(f"n = {n:,}: block crc {crc:08x}, G({n - 1}) = {last}, max {bmax}, err = {err}, "
-                  f"{k / (cycles / (mhz * 1e6)) / 1e6:.2f} M values/s, {done:,} values in {el:.0f} s{eta}",
+            # whole run (from --n0, across restarts) first, then this session
+            print(f"n = {n:,}: block crc {crc:08x}, G({n - 1}) = {last}, max {bmax} (run {gmax}), "
+                  f"err = {err}, {k / (cycles / (mhz * 1e6)) / 1e6:.2f} M values/s, "
+                  f"{n - args.n0:,} values; this session {done:,} in {el:.0f} s{eta}",
                   flush=True)
             if err:
                 print("err: all 256 common values marked in this block -- the speculation failed here "
