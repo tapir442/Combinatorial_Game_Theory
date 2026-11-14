@@ -15,3 +15,14 @@ fpga/vivado/
 fpga/.gitignore
 fpga/_ide/
 fpga/fpga.*
+# local files in the project root: Vivado / xsim leftovers, scratch notebook and downloads
+/.Xil/
+/vivado.jou
+/vivado.log
+/xelab.pb
+/xvlog.pb
+/Untitled.ipynb
+/index.html
+/index.html.*
+/resume.txt
+/Nexys A7 Reference Manual - Digilent Reference.pdf
