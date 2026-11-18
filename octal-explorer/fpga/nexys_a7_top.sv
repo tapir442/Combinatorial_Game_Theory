@@ -15,8 +15,19 @@
 //                            more values in front (any) and these restores the state.
 //   'M' v:u32                raise the display maximum to v (the host's maximum of the
 //                            run so far, after an 'L')                       -> 'm'
+//   'K'                      period search: latch the fingerprint of the current window
+//                            as the checkpoint, clear the hit and the count  -> 'k' fp:u64
+//   'H'                      period search status -> 'h' fp:u64 chk:u64 since:u64
+//                            flags:u8 hit_at:u64  (flags bit 0 hit, bit 1 checkpoint set;
+//                            since = values computed since 'K'; hit_at = since at the
+//                            first computed value after which fp == chk: the period)
+// Period search: window_fp.sv keeps a 64-bit fingerprint of the core's history window
+// (the last DEPTH values, which determine everything that follows).  After each
+// computed value it is compared with the checkpoint; the first match is latched
+// (sticky until the next 'K').  The core is never stopped; the host confirms a hit by
+// comparing whole windows ('D') p values apart.
 // S, C and D continue from where the previous command stopped.
-// LEDs: 0 busy, 1 err, 2 MMCM locked, 15..8 progress (top bits of the count).
+// LEDs: 0 busy, 1 err, 2 MMCM locked, 3 period-search hit, 15..8 progress (top bits of the count).
 // 7-segment display: the highest nim-value so far (preloaded or computed), in decimal;
 // cleared by each 'L', raised by 'M'.
 `include "folded_info.svh"   // FOLD_P, FOLD_S, FOLD_DEPTH (gen_folded.py)
@@ -87,7 +98,7 @@ module nexys_a7_top #(
     endfunction
 
     // ---- command FSM ----
-    typedef enum logic [3:0] {IDLE, ARG, LOAD_LO, LOAD_HI, LOAD_PUT, RUN, REPLY, D_ROT, D_LO, D_HI} st_t;
+    typedef enum logic [3:0] {IDLE, PRE, DECODE, ARG, LOAD_LO, LOAD_HI, LOAD_PUT, RUN, REPLY, D_ROT, D_LO, D_HI} st_t;
     st_t st;
     reg [7:0]  cmd;
     reg [31:0] n, left, done;
@@ -100,16 +111,30 @@ module nexys_a7_top #(
     // of ce_d (which feeds the core's replicated shift enables)
     reg        l_gt2, l_gt1, l_eq1, l_nz;
     reg        room_q, rep_room_q;      // FIFO space, registered (the FIFO has ample margin)
-    reg        all_out;                 // done == n, registered
+    reg        all_out, all_out2;       // done == n, registered; and one clock later
+    // command byte decoded into registered flags (PRE), used in DECODE
+    reg        c_I, c_K, c_H, c_D, c_arg;
     reg [8:0]  last;
     // block maximum: from registered copies of the output (off the critical path)
-    reg        bv_q;
-    reg [8:0]  bval_q, bmax;
+    reg        bv_q, bv_q2, bgt;        // bgt: bval_q > bmax, registered (values are 8 clocks apart)
+    reg [8:0]  bval_q, bval_q2, bmax;
     reg [31:0] bcnt, bmax_at;
-    reg [7:0]  rep [0:21];
-    reg [4:0]  rep_n, rep_i;
+    reg [7:0]  rep [0:39];
+    reg [5:0]  rep_n, rep_i;
     reg        gset = 1'b0;             // 'M': raise gmax to gset_v
     reg [8:0]  gset_v;
+    // period search (window_fp below): the fingerprint, the checkpoint and the hit
+    wire [63:0] fp;                     // fingerprint of the current window
+    wire        fp_upd_comp;            // fp just changed for a computed value
+    reg  [63:0] chk = 64'd0;            // checkpoint ('K')
+    reg         chk_v = 1'b0;           // a checkpoint is set
+    reg  [31:0] since_lo = 32'd0, since_hi = 32'd0;  // computed values since the checkpoint;
+    reg         since_c = 1'b0;         // the carry reaches since_hi one clock later
+    wire [63:0] since = {since_hi, since_lo};
+    reg         hit = 1'b0;             // sticky: fp == chk after some computed value
+    reg  [63:0] hit_at = 64'd0;         // since at the first hit = the period
+    reg         fp_eq = 1'b0, fp_cmp = 1'b0, fp_cmp2 = 1'b0;   // compare stages (registered)
+    reg         k_go = 1'b0;            // 'K' decoded: latch the checkpoint in the next clock
 
     reg hi_pending = 0, hi_bit;          // high byte of a streamed value, one clock later
     always @(posedge clk) begin
@@ -140,23 +165,65 @@ module nexys_a7_top #(
         room_q <= (cmd == "C") || (f_cnt < 9'd240);
         rep_room_q <= f_cnt < 9'd250;
         all_out <= (done == n);              // one clock late; done only grows during a run
+        all_out2 <= all_out;                 // the block maximum needs one clock more
+        c_I <= cmd == "I"; c_K <= cmd == "K"; c_H <= cmd == "H"; c_D <= cmd == "D";
+        c_arg <= cmd == "L" || cmd == "S" || cmd == "C" || cmd == "M";
         cyc_hi <= cyc_hi + cyc_c;            // (ARG below overrides these on a new command)
         cyc_c <= 1'b0;
         bv_q <= (st == RUN) && out_valid;
         bval_q <= out_data;
+        bv_q2 <= bv_q;
+        bval_q2 <= bval_q;
+        bgt <= bval_q > bmax;
+        // period search.  Clock U (fp_upd_comp high): fp is new; count the value (low
+        // half) and compare.  U+1: the carry goes into the high half.  U+2: since includes
+        // this value in both halves; latch the first hit.  (Computed values come every
+        // P = 8 clocks, so fp and fp_eq hold meanwhile.)
+        fp_eq   <= fp == chk;
+        fp_cmp  <= fp_upd_comp;
+        fp_cmp2 <= fp_cmp;
+        since_c <= 1'b0;
+        if (fp_upd_comp) {since_c, since_lo} <= {1'b0, since_lo} + 33'd1;
+        since_hi <= since_hi + since_c;
+        if (fp_cmp2 && fp_eq && chk_v && !hit) begin hit <= 1'b1; hit_at <= since; end
+        // 'K', one clock after DECODE (no value is in flight while the FSM is idle)
+        k_go <= 1'b0;
+        if (k_go) begin
+            chk <= fp; chk_v <= 1'b1; hit <= 1'b0; hit_at <= 64'd0;
+            since_lo <= 32'd0; since_hi <= 32'd0; since_c <= 1'b0;
+        end
         if (rst) begin
             st <= IDLE;
+            chk_v <= 1'b0; hit <= 1'b0;
         end else case (st)
-        IDLE: if (rx_v) begin
-            cmd <= rx_d; argi <= 0; n <= 0;
-            if (rx_d == "I") begin
+        // the command byte is registered first: its decode (many reply registers) does not
+        // sit behind the UART's output
+        IDLE: if (rx_v) begin cmd <= rx_d; st <= PRE; end
+        PRE:  st <= DECODE;                  // the c_* flags are computed from cmd
+        DECODE: begin
+            argi <= 0; n <= 0; st <= IDLE;
+            if (c_I) begin
                 rep[0] <= "I"; rep[1] <= 8'(`FOLD_P); rep[2] <= 8'(MHZ); rep[3] <= 8'(MHZ >> 8);
                 {rep[7], rep[6], rep[5], rep[4]} <= 32'(`FOLD_DEPTH);
                 {rep[9], rep[8]} <= 16'(`FOLD_S);
                 rep_n <= 10; rep_i <= 0; st <= REPLY;
-            end else if (rx_d == "D") begin
+            end else if (c_K) begin
+                // no value is in flight while idle, so fp is the window's fingerprint
+                k_go <= 1'b1;
+                rep[0] <= "k";
+                {rep[8], rep[7], rep[6], rep[5], rep[4], rep[3], rep[2], rep[1]} <= fp;
+                rep_n <= 9; rep_i <= 0; st <= REPLY;
+            end else if (c_H) begin
+                rep[0] <= "h";
+                {rep[8], rep[7], rep[6], rep[5], rep[4], rep[3], rep[2], rep[1]} <= fp;
+                {rep[16], rep[15], rep[14], rep[13], rep[12], rep[11], rep[10], rep[9]} <= chk;
+                {rep[24], rep[23], rep[22], rep[21], rep[20], rep[19], rep[18], rep[17]} <= since;
+                rep[25] <= {6'd0, chk_v, hit};
+                {rep[33], rep[32], rep[31], rep[30], rep[29], rep[28], rep[27], rep[26]} <= hit_at;
+                rep_n <= 34; rep_i <= 0; st <= REPLY;
+            end else if (c_D) begin
                 left <= 32'(`FOLD_DEPTH); l_nz <= 1'b1; st <= D_ROT;
-            end else if (rx_d == "L" || rx_d == "S" || rx_d == "C" || rx_d == "M") st <= ARG;
+            end else if (c_arg) st <= ARG;
         end
         ARG: if (rx_v) begin
             n <= arg;
@@ -187,9 +254,9 @@ module nexys_a7_top #(
             l_gt2 <= 1'b0; l_gt1 <= 1'b0; l_eq1 <= left == 2; l_nz <= left == 2;
         end
         RUN: begin
-            if (bv_q) begin                      // the last value lands 1 clock before all_out
+            if (bv_q2) begin                     // the last value lands 1 clock before all_out2
                 bcnt <= bcnt + 1;
-                if (bval_q > bmax) begin bmax <= bval_q; bmax_at <= bcnt; end
+                if (bgt) begin bmax <= bval_q2; bmax_at <= bcnt; end
             end
             if (l_nz) {cyc_c, cyc_lo} <= {1'b0, cyc_lo} + 33'd1;
             if (shifting) begin
@@ -202,7 +269,7 @@ module nexys_a7_top #(
                 done <= done + 1;
                 if (cmd == "S") begin q_wr <= 1'b1; q_d <= out_data[7:0]; end
             end
-            if (!l_nz && all_out) begin
+            if (!l_nz && all_out2) begin
                 if (cmd == "S") begin rep[0] <= "s"; rep[1] <= {7'd0, err}; rep_n <= 2; end
                 else begin
                     rep[0] <= "c";
@@ -240,19 +307,26 @@ module nexys_a7_top #(
     wire [8:0] g_val = out_valid ? out_data : ld_data;
     reg        g_new_q = 1'b0;           // registered first: the compare is not timing-critical
     reg  [8:0] g_val_q;
+    reg        g_comp_q = 1'b0;          // ... and the value was computed (not loaded)
     always @(posedge clk) begin
         g_new_q <= g_new;
         g_val_q <= g_val;
+        g_comp_q <= out_valid;
         if (rst || (st == IDLE && rx_v && rx_d == "L")) gmax <= 9'd0;
         else if (gset && gset_v > gmax) gmax <= gset_v;
         else if (g_new_q && g_val_q > gmax) gmax <= g_val_q;
     end
+    // ---- period search: fingerprint of the history window (one event per shift) ----
+    window_fp #(.DEPTH(`FOLD_DEPTH)) u_fp (.clk(clk), .ev(g_new_q), .comp(g_comp_q), .v(g_val_q),
+                                           .fp(fp), .upd(), .upd_comp(fp_upd_comp));
+
     seg7_dec3 u_seg (.clk(clk), .value(gmax), .seg(SEG), .dp(DP), .an(AN));
 
     assign LED[0] = st != IDLE;
     assign LED[1] = err;
     assign LED[2] = locked;
-    assign LED[7:3] = 5'd0;
+    assign LED[3] = hit;
+    assign LED[7:4] = 4'd0;
     assign LED[15:8] = done[31:24];
 endmodule
 

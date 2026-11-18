@@ -8,6 +8,7 @@
 #   * run_board.py --no-check --total 0       -> continues from build/board-state.bin
 #     - stopped by the service (SIGINT)       -> it finishes its block, saves, we exit
 #     - exit 3 (err: speculation failed)      -> stop for good (the state file is kept)
+#     - exit 5 (period confirmed)             -> stop for good (see the log)
 #     - anything else (board unplugged, ...)  -> retry in $RETRY s
 # Output goes to the journal and to build/board-run.log.
 set -u
@@ -67,6 +68,7 @@ while :; do
     rc=${PIPESTATUS[0]}
     [ $stopping = 1 ] && { say "stopped (run_board.py exit $rc)"; exit 0; }
     if [ "$rc" = 3 ]; then say "speculation failed (err): not restarting"; exit 3; fi
+    if [ "$rc" = 5 ]; then say "period confirmed: not restarting"; exit 5; fi
     say "run_board.py exited with $rc"
     pause
 done

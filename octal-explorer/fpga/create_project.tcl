@@ -42,7 +42,7 @@ set_property simulator_language Verilog [current_project]
 
 add_files -fileset sources_1 [list \
     "$gen/officers_folded.sv" "$gen/folded_info.svh" \
-    "$here/ffs256.sv" "$here/uart.sv" "$here/nexys_a7_top.sv"]
+    "$here/ffs256.sv" "$here/uart.sv" "$here/window_fp.sv" "$here/nexys_a7_top.sv"]
 set_property file_type SystemVerilog [get_files -of_objects [get_filesets sources_1] *.sv]
 set_property file_type {Verilog Header} [get_files folded_info.svh]
 set_property include_dirs [list $gen] [get_filesets sources_1]

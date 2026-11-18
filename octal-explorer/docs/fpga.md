@@ -175,12 +175,16 @@ USB port, and a command FSM. All numbers are little-endian:
 | `S` n:u32 | compute n values and stream each as u16, then `s` err:u8 |
 | `C` n:u32 | compute n values at full speed → `c` crc:u32 cycles:u64 last:u16 err:u8 max:u16 at:u32 (CRC-32 as zlib, over the values as u16; max = highest value of the block, first at value number at, from 0) |
 | `D` | dump the history → 20,627 × u16, G(n−20,627 … n−1) oldest first, then `d`; S and C continue afterwards |
+| `M` v:u32 | raise the display maximum to v → `m` |
+| `K` | period search: the current window's fingerprint becomes the checkpoint; clears the hit and the count → `k` fp:u64 |
+| `H` | period search status → `h` fp:u64 chk:u64 since:u64 flags:u8 hit_at:u64 (flags: bit 0 hit, bit 1 checkpoint set; since = values computed since `K`; hit_at = the period, see *Period search*) |
 
 `S` and `C` continue from where the previous command stopped. The LEDs show:
 
 * 0: busy
 * 1: error
 * 2: MMCM locked
+* 3: period-search hit
 * 15–8: progress
 
 The 7-segment display shows the **highest nim-value so far**, preloaded or
@@ -460,9 +464,78 @@ only 9 months to Grossman's 1.4 · 10¹⁴. These figures are extrapolated from 
 three builds; the W = 8 group has not been built.
 
 So for now verification stays on the CPU, and the board stays a speculation and
-search engine (long runs, maxima, next a period search). A board check is worth
+search engine (long runs, maxima, and the period search below). A board check is worth
 building only with a much cheaper lane. Most of a lane's area goes to the
 256-bit missing set, so that is where to look first.
+
+## Period search
+
+The folded core's next value depends only on its history window, the last
+DEPTH = 20,627 values (the largest rare heap). If the window at n equals the window
+at an earlier checkpoint n_c, the speculated sequence repeats from n_c with period
+p = n − n_c, forever. The board looks for that while it runs. It does not slow the
+core.
+
+**The fingerprint.** `window_fp.sv` reads a 9-bit value w as a polynomial over GF(2).
+It keeps
+
+  fp = Σⱼ wⱼ(x) · x^(9j) mod P,  w₀ = G(n−1), …, w_{D−1} = G(n−D),
+
+with P = x⁶⁴ + `0x1028ecf30eb3f40d`, irreducible and chosen at random (seed 20261118;
+Rabin's test). Two different windows collide only if P divides their difference
+(about 9D / 2⁶⁴ ≈ 10⁻¹⁴, and no swap or burst pattern is special). When v enters
+and `old` leaves the window:
+
+  fp′ = fp · x⁹ ⊕ v ⊕ old · x^(9D) mod P
+
+That is a fixed XOR network: the 9 constants x^(9D+i) mod P are computed at
+elaboration, and there are no carries or DSPs. The module gets `old` from its own
+copy of the window in block RAM, a ring of 20,627 × 9 bits fed by the top level's
+one event per history shift (computed values, loads, dump rotations). So it does not
+depend on the core's timing. fp and the ring start as zeros and are never reset
+separately, so fp is always the fingerprint of the ring. After an `L` the ring equals
+the core's window.
+
+**The check.** After every computed value the top level compares fp with the
+checkpoint. The first match is latched: `hit_at` is the number of values computed
+since `K`, i.e. the period. The hit stays until the next `K`, and the core runs on.
+
+**The host** (`run_board.py --no-check`, so the board service does all of this):
+
+* At the start of a session: after the load, the board's fingerprint must equal the
+  one computed in Python from the loaded window. Then `K`, which sets the checkpoint
+  n_c = the start heap.
+* After every block: the fingerprint must equal Python's fingerprint of the dump.
+  This tests the hardware about every 40 s; a difference exits with 4.
+* Brent: once n ≥ 2 n_c, the checkpoint moves to n. So a period is found once the
+  preperiod lies below a checkpoint, within about twice the time it takes to run
+  through the period.
+* On a hit with period p: dump W(n), run exactly p more values, dump W(n + p) and
+  compare value by value. If they are equal, the speculated sequence is periodic:
+  the run prints `PERIOD CONFIRMED`, saves and exits with 5, and the service does not
+  restart. Otherwise it was a fingerprint collision, and a new checkpoint is set.
+
+A confirmed period of the *speculated* values is a candidate only. It becomes a
+result with the values verified (`octal --rare`) over the range that the periodicity
+theorem for octal games asks for. A restart sets a new checkpoint at the restart heap
+(the board cannot be given an old one); that only delays the Brent schedule.
+
+**Tests.**
+
+* `sim_window_fp.sh`: xsim of `window_fp` with 63,115 random events, partly back to
+  back. `check_window_fp.py` checks every fingerprint against the rolling formula
+  and about 60 of them against the window recomputed from scratch.
+* `run_board.py` (check mode), on the board:
+  * the fingerprint after the load and after a dump, against Python;
+  * `K` at W(n), then reload W(n−1) and compute one value: the window is W(n) again,
+    so there must be a hit with period 1.
+
+  Both passed on 2026-11-18, together with the stream, CRC, dump and resume checks.
+
+**Cost.** The build with the period search meets 200 MHz with WNS +0.280 ns, and
+uses 41,190 LUTs (65 %) and 9 block-RAM tiles (the ring). The critical path is
+back inside the core. The long run resumed with it at n = 5.27·10¹², which is
+also its first checkpoint.
 
 ## Vivado project
 
@@ -507,6 +580,8 @@ reusing old results, in these cases:
 | `fpga/run_board.py` | host side: load, stream, CRC run, dump, compare with octal; `--no-check` long runs with saved state |
 | `fpga/board_service.sh`, `fpga/officers-board.service` | systemd user service that keeps the long run going |
 | `fpga/witness_depth.c` | step-2 witness depth per heap (CPU), for sizing a check on the FPGA |
+| `fpga/window_fp.sv` | period search: block-RAM copy of the window and its 64-bit fingerprint |
+| `fpga/tb_window_fp.sv`, `fpga/check_window_fp.py`, `fpga/sim_window_fp.sh` | xsim test of `window_fp` against Python |
 | `fpga/split_model.c` | model of an on-board check: fixed taps, free lanes, lockstep groups; tail beyond a BRAM window |
 | `fpga/check_group.sv` | one lockstep group of check lanes (first cut, for area and clock estimates) |
 | `fpga/synth_check.tcl` | out-of-context place and route of `check_group` on the A7 part |

@@ -14,7 +14,7 @@ KillSignal=SIGINT
 TimeoutStopSec=120
 Restart=on-failure
 RestartSec=300
-RestartPreventExitStatus=3
+RestartPreventExitStatus=3 5
 
 [Install]
 WantedBy=default.target
