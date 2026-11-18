@@ -2,11 +2,12 @@
 # synth_check.tcl -- resource and clock estimate for the split-check lanes
 #
 #   cd fpga/build/check-logs        (Vivado drops its .log/.jou in the cwd)
-#   vivado -mode batch -source ../../synth_check.tcl -tclargs GS W [MHZ] [TOP]
+#   vivado -mode batch -source ../../synth_check.tcl -tclargs GS W [MHZ] [TOP] [NC]
 #
 # TOP is check_group (default), check_group_lr (the LUT-RAM lanes; W must
 # be 1 there, it has no W parameter) or check_cluster (NS groups of GS LUT-RAM
-# lanes with their block RAMs; the second argument is then NS).
+# lanes with their block RAMs; the second argument is then NS) or check_top
+# (job builder + NC clusters of NS groups; NC defaults to 2).
 #
 # Synthesizes TOP with GS lanes of W pairs per clock, then places
 # and routes it on its own ("out of context": no board, no pins, no top level),
@@ -14,7 +15,7 @@
 # lane pipeline makes 200 MHz -- not a usable netlist.
 #
 # Output: fpga/build/check-gs<GS>-w<W>/ (check_group_lr: check-lr-gs<GS>/,
-# check_cluster: check-cl-gs<GS>-ns<NS>/)
+# check_cluster: check-cl-gs<GS>-ns<NS>/, check_top: check-top-gs<GS>-ns<NS>-nc<NC>/)
 #   clock.xdc         the clock constraint written below
 #   synth_util.rpt    utilization after synthesis
 #   impl_util.rpt     utilization after place and route (the number to quote)
@@ -33,6 +34,7 @@ set gs  [lindex $argv 0]
 set w   [lindex $argv 1]
 set mhz [expr {[llength $argv] > 2 ? [lindex $argv 2] : 200}]
 set top [expr {[llength $argv] > 3 ? [lindex $argv 3] : "check_group"}]
+set nc  [expr {[llength $argv] > 4 ? [lindex $argv 4] : 2}]
 
 # The Nexys A7-100T's part (Artix-7 100T, speed grade -1), as in create_project.tcl.
 set part xc7a100tcsg324-1
@@ -43,8 +45,10 @@ switch $top {
     check_group    { set out "$here/build/check-gs$gs-w$w" }
     check_group_lr { set out "$here/build/check-lr-gs$gs" }
     check_cluster  { set out "$here/build/check-cl-gs$gs-ns$w" }
+    check_top      { set out "$here/build/check-top-gs$gs-ns$w-nc$nc" }
     default        { error "unknown TOP $top" }
 }
+if {[info exists ::env(PHYS_OPT)] && $::env(PHYS_OPT)} { append out "-po" }
 file mkdir $out
 
 # Synthesis and placement use at most 8 threads (the board service and other
@@ -52,8 +56,9 @@ file mkdir $out
 set_param general.maxThreads 8
 
 # ---- sources ----
-if {$top eq "check_cluster"} {
-    read_verilog -sv [list "$here/check_group_lr.sv" "$here/check_stream.sv" "$here/check_cluster.sv"]
+if {$top in {check_cluster check_top}} {
+    read_verilog -sv [list "$here/check_group_lr.sv" "$here/check_stream.sv" "$here/check_cluster.sv" \
+                           "$here/check_top.sv"]
 } else {
     read_verilog -sv "$here/$top.sv"
 }
@@ -72,15 +77,18 @@ read_xdc -mode out_of_context $xdc
 # check_cluster takes NS instead).
 set generics [list -generic GS=$gs]
 if {$top eq "check_group"}   { lappend generics -generic W=$w }
-if {$top eq "check_cluster"} { lappend generics -generic NS=$w }
+if {$top in {check_cluster check_top}} { lappend generics -generic NS=$w }
+if {$top eq "check_top"}     { lappend generics -generic NC=$nc }
 synth_design -top $top -part $part -mode out_of_context {*}$generics
 report_utilization -file "$out/synth_util.rpt"
 
 # ---- implementation: optimize, place, route ----
-# No phys_opt_design: this is an estimate, and the default flow is closer to
-# what a first board build would get.
+# No phys_opt_design by default: this is an estimate, and the default flow is
+# closer to what a first board build would get.  PHYS_OPT=1 in the environment
+# adds it after placement (output directory gets a -po suffix).
 opt_design
 place_design
+if {[info exists ::env(PHYS_OPT)] && $::env(PHYS_OPT)} { phys_opt_design }
 route_design
 
 # ---- reports ----

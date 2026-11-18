@@ -142,9 +142,11 @@ module check_cluster #(
         if (s == 0) assign take[s] = job_v && idle_q[0];
         else        assign take[s] = job_v && idle_q[s] && !(|idle_q[s-1:0]);
     end
-    assign job_rdy = |idle_q;
+    reg rdy_q = 0;                                     // |idle_q, as a register of its own
+    assign job_rdy = rdy_q;
     always_ff @(posedge clk) begin
         idle_q <= idle & ~take & ~take_q;              // a group just chosen is not idle
+        rdy_q  <= |(idle & ~take & ~take_q);
         take_q <= take;
         if (job_v && job_rdy) begin
             job_n0_q <= job_n0;
@@ -179,6 +181,7 @@ module check_cluster #(
         reg  [2:0]      wc = 0;            // WAIT count
         reg  [GS*9-1:0] sr = 0;            // window values: sr[j] = G(top - a - j)
         wire [GS-1:0]   done, ready;
+        reg             alld = 0;          // all lanes done, registered (one more step is harmless)
         reg             abort = 0;         // with the result: free the lanes (registered)
 
         assign idle[s]   = st == IDLE && &ready;
@@ -191,8 +194,11 @@ module check_cluster #(
 
         wire [8:0] p_head, w_head;
         wire       p_hv, w_hv;
-        wire       stepping = st == SCAN && p_hv && w_hv;
-        wire       w_adv    = (st == FILL && w_hv) || stepping;
+        // in_fill / in_scan: the states FILL and SCAN as flags of their own, so
+        // that stepping (which enables sr and both stream heads) is one LUT
+        reg        in_fill = 0, in_scan = 0;
+        wire       stepping = in_scan && p_hv && w_hv;
+        wire       w_adv    = (in_fill && w_hv) || stepping;
 
         check_stream #(.AW(APW), .DESC(0)) u_p (
             .clk, .flush(take_q[s]), .start_w('0),
@@ -213,19 +219,21 @@ module check_cluster #(
         always_ff @(posedge clk) begin
             if (w_adv) sr <= {w_head, sr[GS*9-1:9]};      // newest at the top: sr[j] <- sr[j+1]
             abort <= st == WAIT && wc == 3'd5;            // high while wc == 6
+            alld  <= &done;
             case (st)
                 IDLE: if (take_q[s]) begin
                     n0 <= job_n0_q;
                     fc <= ($bits(fc))'(15 - top[3:0] + GS);
                     st <= FILL;
+                    in_fill <= 1'b1;
                 end
                 FILL: if (w_hv) begin
                     fc <= fc - 1'b1;
-                    if (fc == 1) begin a <= 0; st <= SCAN; end
+                    if (fc == 1) begin a <= 0; st <= SCAN; in_fill <= 1'b0; in_scan <= 1'b1; end
                 end
                 SCAN: begin
                     if (stepping) a <= a + 1'b1;
-                    if ((stepping && a == LIM - 1) || &done) begin wc <= 0; st <= WAIT; end
+                    if ((stepping && a == LIM - 1) || alld) begin wc <= 0; st <= WAIT; in_scan <= 1'b0; end
                 end
                 WAIT: begin
                     wc <= wc + 1'b1;

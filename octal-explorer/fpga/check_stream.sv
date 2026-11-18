@@ -69,6 +69,9 @@ module check_stream #(
 
     always_ff @(posedge clk) begin
         if (rsp_v && !drop) b[tgt] <= rsp_d;
+        // head's value loads on take even in a flush clock (hv is cleared then):
+        // its enable is `take` alone, one LUT less on the step path
+        if (take) head_r <= b[rb][ptr*9 +: 9];
     end
 
     always_ff @(posedge clk) begin
@@ -95,7 +98,6 @@ module check_stream #(
             end
             // ---- head ----
             if (take) begin
-                head_r <= b[rb][ptr*9 +: 9];
                 hv_r   <= 1'b1;
                 ptr    <= DESC ? ptr - 1'b1 : ptr + 1'b1;   // wraps to FIRST after LAST
                 if (ptr == LAST) begin

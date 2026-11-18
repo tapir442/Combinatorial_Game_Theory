@@ -589,6 +589,51 @@ So P = 16 lets the check nearly keep up with the core: 11–12.5 M verified valu
 per second, depending on how full the chip can be routed. That is 3 times
 `octal --rare`, and 1.4·10¹⁴ in 4–5 months on the board alone.
 
+**The job builder** (`fpga/check_top.sv`) connects the clusters to the core.
+
+* **Inputs.** It takes the top level's value events (`ev`, `comp`, `v`), with
+  `restart`/`n_set` at a load.
+* **Ring writes.** Every value goes into the clusters' window rings.
+* **Jobs.** Every computed value goes, with R(g), into the job being assembled.
+  A complete job goes to the first cluster with an idle group.
+* **Stall.** The builder raises `stall` for the core while a job is pending, or
+  while the ring would overrun the oldest running job.
+* **Results.** It keeps a *verified frontier*: all heaps below it are settled
+  or in the fail list. Jobs finish out of order, so it uses a ring of 64 done
+  bits.
+* **Fail list.** A FIFO of (n₀, mask) for the fallback, and a sticky `err`.
+
+`tb_check_top.sv` (`sim_check_top.sh`) feeds it like the core does. First the
+load of 20,627 values, then one computed value every PCORE clocks, which stops
+while `stall` is high (seen 3 clocks late). At the end the frontier must be
+complete, the fail list must be exactly the heaps of depth ≥ LIM, and `err`
+must be 0:
+
+| clusters × groups | LIM | core | heaps | flagged (expected) | clocks/heap | core stalled |
+|---|---:|---:|---:|---:|---:|---:|
+| 2 × 4 | 4,096 | 1/16 | 512 | 69 (69) | 36.5 | 34 % |
+| 2 × 4 | 2,048 | 1/16 | 2,048 | 1,626 (1,626) | 17.5 | 3 % |
+| 2 × 10 | 16,384 | 1/16 | 4,096 | 0 (0) | 21.5 | 18 % |
+| 1 × 6 | 16,384 | 1/8 | 1,024 | 0 (0) | 65.1 | 74 % |
+
+The 2 × 10 configuration is the one sized for P = 16: 320 lanes. Out of
+context it takes **24,688 LUTs (1,944 LUT-RAM), 31,789 FFs and 25 RAMB36, at
+WNS +0.078 ns**. Timing needed the following changes:
+* the all-done flag and the ring-lag stall test registered;
+* `job_rdy` as a register of its own;
+* the FILL/SCAN states as flags of their own;
+* the stream head's enable as `take` alone;
+* the fail FIFO's full flag registered.
+
+The paths left are mostly routing, not logic. Beside the P = 16 core
+(29,757 LUTs) the total would be about 54.4k LUTs (86 %), 15.0k LUT-RAM (79 %)
+and 34 BRAMs. That is ≈ 10.9 M verified heaps/s, against 12.5 M/s from the core.
+The 4,096-heap simulation includes start-up and gives 9.3 M/s.
+
+**Still open: the fallback.** Heaps beyond LIM = 16,384 pairs are about 4.5·10⁻⁵
+of all heaps, so about 500 per second. Each needs pairs further down than any
+on-board RAM holds: the deepest witness to 10⁸ is at a = 615,713.
+
 ## Period search
 
 The folded core's next value depends only on its history window, the last
@@ -707,6 +752,8 @@ reusing old results, in these cases:
 | `fpga/check_group.sv` | one lockstep group of check lanes (first cut, for area and clock estimates) |
 | `fpga/check_group_lr.sv` | lockstep group of cheaper lanes: seen set in LUT-RAM, counter, self-clear |
 | `fpga/check_stream.sv` | one value per clock out of a wide block RAM shared in time slots |
+| `fpga/check_top.sv` | job builder + clusters: jobs from the core's values, stall, verified frontier, fail list |
+| `fpga/tb_check_top.sv`, `fpga/sim_check_top.sh` | xsim: check_top fed like the core (with stalls), against the model |
 | `fpga/check_cluster.sv` | NS lane groups with prefix and window RAMs, jobs in, unsettled heaps out |
 | `fpga/tb_check_group_lr.sv`, `fpga/sim_check_group_lr.sh` | xsim: each lane's done against the model's witness depth |
 | `fpga/tb_check_cluster.sv`, `fpga/sim_check_cluster.sh` | xsim: the cluster's failed heaps against depth ≥ LIM |
