@@ -72,19 +72,7 @@ module check_top #(
 );
     localparam int LG = $clog2(GS);
 
-    // R(g) table (rare-class values below g), as in check_group_lr's header
-    typedef logic [8:0] rb_t [512];
-    function automatic rb_t rare_below_table();
-        rb_t t;
-        logic [8:0] r;
-        r = 0;
-        for (int g = 0; g < 512; g++) begin
-            t[g] = r;
-            if (!(^(9'(g) & 9'h1EE))) r++;
-        end
-        return t;
-    endfunction
-    localparam rb_t RB = rare_below_table();
+    import check_pkg::RB;                  // R(g) table
 
     // =========================================================================
     // Job builder

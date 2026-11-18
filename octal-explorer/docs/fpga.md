@@ -630,9 +630,58 @@ The paths left are mostly routing, not logic. Beside the P = 16 core
 and 34 BRAMs. That is ≈ 10.9 M verified heaps/s, against 12.5 M/s from the core.
 The 4,096-heap simulation includes start-up and gives 9.3 M/s.
 
-**Still open: the fallback.** Heaps beyond LIM = 16,384 pairs are about 4.5·10⁻⁵
-of all heaps, so about 500 per second. Each needs pairs further down than any
-on-board RAM holds: the deepest witness to 10⁸ is at a = 615,713.
+**The fallback: one deep lane on DDR2.** Heaps beyond LIM = 16,384 pairs are about
+4.5·10⁻⁵ of all heaps, so about 500 per second, at about 30,000 pairs each. Their
+pairs go further down than any on-chip RAM holds: the deepest witness to 10⁸ is
+at a = 615,713. The board's 128 MiB DDR2 holds them.
+
+* **DDR2 controller.** The MIG 7-series controller comes from Digilent's MIG
+  project for the board (`fpga/ddr2_mig.prj`, changed to the native interface).
+  `fpga/synth_mig.tcl` generates and synthesizes it: **3,703 LUTs (368
+  LUT-RAM), 3,261 FFs**, an MMCM and a PLL, no BRAM. It runs DDR2 at 325 MHz
+  with a 4:1 PHY, so the user clock is 81.25 MHz and a word is 128 bits.
+* **Layout.** The prefix region G(0 … 8·2²¹−1) is loaded by the host. The ring
+  holds the last 32 M values, written as the core makes them, 8 values (16-bit
+  slots) per word.
+* **The lane** (`fpga/check_deep.sv`, in the 81 MHz domain). It reads g = G(n)
+  from the ring and scans a = 0, 1, … with two read streams of up to 16 words in
+  flight each. The seen set and counter work like `check_group_lr`.
+* **Safety.** The scan stops at the smallest of m/2, the prefix loaded, and
+  m − oldest, where oldest is the oldest ring value valid in this session (with a
+  margin of 2²⁰ for the values the core writes during a long scan). A heap not
+  settled by then is reported *unresolved*, never verified. That matters after a
+  restart: the ring then holds only this session's values.
+
+`tb_check_deep.sv` (`sim_check_deep.sh`) runs it against a MIG model. Commands
+and write data are refused at random; reads come back in order after 20–40
+clocks. Jobs are all heaps of depth > 8,000 among 4,096 from 10⁶, plus every
+64th. r_ok must equal (depth ≤ the limit):
+
+| prefix | session from | MIG ready | verified | unresolved | errors |
+|---:|---:|---:|---:|---:|---:|
+| 65,536 | 900,000 | 70 % | 74 | 0 | 0 |
+| 4,096 | 900,000 | 70 % | 48 | 26 | 0 |
+| 65,536 | 994,000 | 70 % | 72 | 2 | 0 |
+| 65,536 | 900,000 | 30 % | 74 | 0 | 0 |
+
+It scans about 0.9 pairs per clock (≈ 75 M pairs/s), 5 times what the
+fallback needs. Out of context at 81.25 MHz: **846 LUTs (106 LUT-RAM), 833 FFs,
+WNS +4.49 ns**.
+
+**The budget beside the P = 16 core:**
+
+| part | LUTs |
+|---|---:|
+| speculation core (P = 16), UART, period search | 29,757 |
+| check: builder + 2 × 10 groups | 24,688 |
+| DDR2 controller | 3,703 |
+| deep lane | 846 |
+| total | ≈ 59.0k (93 %) |
+
+The bridge between the 200 MHz and 81 MHz domains, and the host protocol, are
+still to come (estimated a few hundred LUTs). 93 % is probably too full to
+route at 200 MHz, so the full build will likely give up a group or two
+(2 × 9 groups: ≈ 56.6k LUTs, ≈ 9.8 M verified values/s).
 
 ## Period search
 
@@ -754,6 +803,10 @@ reusing old results, in these cases:
 | `fpga/check_stream.sv` | one value per clock out of a wide block RAM shared in time slots |
 | `fpga/check_top.sv` | job builder + clusters: jobs from the core's values, stall, verified frontier, fail list |
 | `fpga/tb_check_top.sv`, `fpga/sim_check_top.sh` | xsim: check_top fed like the core (with stalls), against the model |
+| `fpga/check_pkg.sv` | shared by the check modules: the R(g) table, the rare-class test |
+| `fpga/check_deep.sv` | the fallback: one deep lane reading prefix and ring from DDR2 (MIG native interface) |
+| `fpga/tb_check_deep.sv`, `fpga/sim_check_deep.sh` | xsim: the deep lane with a MIG model, verified vs. unresolved against the model |
+| `fpga/ddr2_mig.prj`, `fpga/synth_mig.tcl` | the DDR2 controller (Digilent's MIG project, native interface) and its area |
 | `fpga/check_cluster.sv` | NS lane groups with prefix and window RAMs, jobs in, unsettled heaps out |
 | `fpga/tb_check_group_lr.sv`, `fpga/sim_check_group_lr.sh` | xsim: each lane's done against the model's witness depth |
 | `fpga/tb_check_cluster.sv`, `fpga/sim_check_cluster.sh` | xsim: the cluster's failed heaps against depth ≥ LIM |

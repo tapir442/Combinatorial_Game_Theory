@@ -7,7 +7,8 @@
 # TOP is check_group (default), check_group_lr (the LUT-RAM lanes; W must
 # be 1 there, it has no W parameter) or check_cluster (NS groups of GS LUT-RAM
 # lanes with their block RAMs; the second argument is then NS) or check_top
-# (job builder + NC clusters of NS groups; NC defaults to 2).
+# (job builder + NC clusters of NS groups; NC defaults to 2) or check_deep (the
+# DDR2 fallback lane; GS and W are ignored, give MHZ = 81.25, the MIG user clock).
 #
 # Synthesizes TOP with GS lanes of W pairs per clock, then places
 # and routes it on its own ("out of context": no board, no pins, no top level),
@@ -46,6 +47,7 @@ switch $top {
     check_group_lr { set out "$here/build/check-lr-gs$gs" }
     check_cluster  { set out "$here/build/check-cl-gs$gs-ns$w" }
     check_top      { set out "$here/build/check-top-gs$gs-ns$w-nc$nc" }
+    check_deep     { set out "$here/build/check-deep" }
     default        { error "unknown TOP $top" }
 }
 if {[info exists ::env(PHYS_OPT)] && $::env(PHYS_OPT)} { append out "-po" }
@@ -57,8 +59,10 @@ set_param general.maxThreads 8
 
 # ---- sources ----
 if {$top in {check_cluster check_top}} {
-    read_verilog -sv [list "$here/check_group_lr.sv" "$here/check_stream.sv" "$here/check_cluster.sv" \
-                           "$here/check_top.sv"]
+    read_verilog -sv [list "$here/check_pkg.sv" "$here/check_group_lr.sv" "$here/check_stream.sv" \
+                           "$here/check_cluster.sv" "$here/check_top.sv"]
+} elseif {$top eq "check_deep"} {
+    read_verilog -sv [list "$here/check_pkg.sv" "$here/check_deep.sv"]
 } else {
     read_verilog -sv "$here/$top.sv"
 }
@@ -75,7 +79,7 @@ read_xdc -mode out_of_context $xdc
 # -mode out_of_context: no I/O buffers are inserted on the ports.
 # -generic overrides the module parameters GS and W (check_group_lr has no W;
 # check_cluster takes NS instead).
-set generics [list -generic GS=$gs]
+set generics [expr {$top eq "check_deep" ? {} : [list -generic GS=$gs]}]
 if {$top eq "check_group"}   { lappend generics -generic W=$w }
 if {$top in {check_cluster check_top}} { lappend generics -generic NS=$w }
 if {$top eq "check_top"}     { lappend generics -generic NC=$nc }

@@ -11,7 +11,7 @@ if [ ! -f "$vec/expect.txt" ]; then
     env -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH /usr/bin/python3 "$here/gen_check_vectors.py" "$vec" "$n0" "$heaps"
 fi
 export LD_LIBRARY_PATH=$here/build/compat:${LD_LIBRARY_PATH:-}
-xvlog -sv "$here/check_group_lr.sv" "$here/check_stream.sv" "$here/check_cluster.sv" "$here/check_top.sv" \
+xvlog -sv "$here/check_pkg.sv" "$here/check_group_lr.sv" "$here/check_stream.sv" "$here/check_cluster.sv" "$here/check_top.sv" \
       "$here/tb_check_top.sv" > xvlog.log
 xelab -debug off tb_check_top -generic_top "NS=$ns" -generic_top "NC=$nc" -generic_top "LIM=$lim" \
       -generic_top "PCORE=$pc" -generic_top "NMAX=$((n0 + heaps))" -generic_top "HMAX=$heaps" \
