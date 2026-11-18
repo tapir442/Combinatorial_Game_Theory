@@ -327,11 +327,14 @@ chip can expect somewhere around 200–250 MHz at best.
   FPGA as well (step 2 needs random access to all of G, i.e. DDR), or the FPGA
   only *searches*: it runs ahead, finds candidates (e.g. a period match), and
   the CPU confirms just those.
-* **A split check does not fit.** The idea was to let the FPGA check each heap
-  against the first K common heaps (the same tap structure as the speculation
-  core), and to hand only the heaps it cannot settle to the PC. That only
-  pays off if the step-2 witnesses are shallow, and for Officers they are not
-  (below).
+* **A split check fits, but barely pays.** The first idea was to check each heap
+  against the first K heaps with fixed taps (the tap structure of the
+  speculation core) and to hand the heaps it cannot settle to the PC. That
+  fails, because the step-2 witnesses of Officers are deep (*Witness depth*,
+  below). Lanes that stream the pairs out of block RAM and stop at the last
+  witness, with DDR2 for the rare deep heaps, would fit. But beside the
+  speculation core they verify only about 4 M values/s, about as fast as
+  `octal --rare` on 24 threads (*Split check with lanes*, below).
 * **Host interface.** The UART (2 Mbaud) is enough for loading, CRC runs and
   spot checks. It is not enough to stream every value (about 100k values/s).
   The full core would need PCIe/DMA (1 byte per value: about 230 MB/s).
@@ -376,9 +379,90 @@ For the Nexys A7 this means:
   beyond its whole block RAM (about 540k 9-bit values), and the UART carries about
   100k values/s.
 
-So verification stays on the CPU (`octal --rare`; Grossman's verified range is
-1.4 · 10¹⁴). The board stays a speculation and search engine: long runs, maxima,
-and next a period search, which needs no witnesses.
+This rules out fixed taps with the PC finishing the rest. Two things were
+overlooked here, though, and the next section takes them up: the folded core
+uses none of the 135 block RAMs (its history is LUT-RAM), and the board has
+128 MiB of DDR2.
+
+### Split check with lanes
+
+`fpga/split_model.c` recomputes G like `witness_depth.c` (same CRC, `121478ad` for
+G(50,000 … 10⁸ − 1)). It records per heap the work of the check and runs it through
+three layouts:
+
+```
+gcc -O3 -march=native -Wall -o build/split_model split_model.c
+build/split_model 1e8         # 11 min, 200 MB
+```
+
+**What the check is.** For n ≥ 50,000, step 1 never reaches a rare-class value
+(0 times to 10⁸). The reason: every rare heap r is below 50,000, its partner
+G(n−1−r) is common, and rare ⊕ common is common. So the check of heap n is all of
+step 2. Every rare-class value below the speculated g ("need": mean 57.3, max 162)
+must be some G(a) ⊕ G(n−1−a). The scan a = 1, 2, … stops at the witness depth.
+The check may use the core's own speculated values: if every heap before n
+passed, they are all correct (induction).
+
+**Layouts** (to 10⁸; "decoders" = pairs evaluated per clock over all lanes):
+
+| layout | how | heaps per clock | at 200 MHz, 128 decoders |
+|---|---|---|---:|
+| A fixed taps | pairs 1 … K for every heap; deeper heaps go to a fallback | decoders / K | 3.1 M/s (K = 8,192) |
+| B free lanes | each lane streams its own heap from BRAM and stops at its depth | ≈ decoders / 2,750 | 9.3 M/s |
+| C lockstep groups | GS lanes on GS consecutive heaps share the BRAM reads; the group waits for its deepest heap | B × efficiency | 4.4 M/s (GS = 4) |
+
+* **B is ideal but impossible.** Every lane would need its own read ports into
+  the prefix G(1 …) and the window of recent values. That needs far more than
+  135 BRAMs.
+* **C shares the reads.** All lanes of a group read the same G(a), and their
+  window values G(m₀+i−a) are consecutive, so one wide read serves them all.
+  The price is the group maximum:
+
+  | GS | 1 | 2 | 4 | 8 | 16 | 32 |
+  |---|---:|---:|---:|---:|---:|---:|
+  | mean group maximum | 2,749 | 3,612 | 4,443 | 5,157 | 5,820 | 6,431 |
+  | efficiency | 1 | 0.76 | 0.62 | 0.53 | 0.47 | 0.43 |
+
+* **Pairs per lane (W) hardly matter.** For a fixed number of decoders,
+  throughput changes by under 1 % between 1 and 8 pairs per lane and clock.
+
+**The deep tail goes to DDR2.** Lanes read a BRAM window. A heap whose window
+span (its depth, plus the heaps produced while it waits and runs) exceeds the
+window needs a fallback:
+
+| window | heaps beyond it | fallback pairs per heap |
+|---:|---:|---:|
+| 16,384 | 4.5 · 10⁻⁵ | 0.62 |
+| 32,768 | 8.3 · 10⁻⁶ | 0.35 |
+| 65,536 | 3.2 · 10⁻⁶ | 0.18 |
+
+A 64k window is 16 RAMB36 per copy. At 4 M heaps/s about 13 heaps/s fall through,
+needing about 0.7 M pairs/s in all. One slow lane reading from DDR2 handles that.
+So the deep witnesses that ruled out the PC fallback are no problem on the board.
+
+**Area is the limit.** `fpga/check_group.sv` is a first cut of one lockstep group
+(not connected yet). `fpga/synth_check.tcl` places and routes it out of context on
+the xc7a100t-1 at 200 MHz:
+
+| group | LUTs | FFs | WNS | LUTs per decoder |
+|---|---:|---:|---:|---:|
+| 16 lanes × 1 pair | 9,645 | 4,278 | +0.257 ns | 603 |
+| 16 lanes × 2 pairs | 12,463 | 4,438 | +0.101 ns | 390 |
+| 4 lanes × 2 pairs | 3,517 | 1,121 | +0.461 ns | 440 |
+
+A lane costs about 430 LUTs fixed, mostly its 256-bit set of missing values and
+the test for empty. Each pair per clock adds about 175 LUTs. About 22k LUTs are
+free beside the speculation core (P = 8). Groups of 4 lanes × 8 pairs (≈ 7.3k LUTs
+each) give three groups and 96 decoders. That is 96 × 0.62 / 2,750 heaps per clock
+≈ **4 M values/s**, the speed of `octal --rare` on 24 threads (≈ 3.8 M/s). Folding
+the speculation core to P = 16 would free LUTs for perhaps 6 M/s. That is still
+only 9 months to Grossman's 1.4 · 10¹⁴. These figures are extrapolated from the
+three builds; the W = 8 group has not been built.
+
+So for now verification stays on the CPU, and the board stays a speculation and
+search engine (long runs, maxima, next a period search). A board check is worth
+building only with a much cheaper lane. Most of a lane's area goes to the
+256-bit missing set, so that is where to look first.
 
 ## Vivado project
 
@@ -423,6 +507,9 @@ reusing old results, in these cases:
 | `fpga/run_board.py` | host side: load, stream, CRC run, dump, compare with octal; `--no-check` long runs with saved state |
 | `fpga/board_service.sh`, `fpga/officers-board.service` | systemd user service that keeps the long run going |
 | `fpga/witness_depth.c` | step-2 witness depth per heap (CPU), for sizing a check on the FPGA |
+| `fpga/split_model.c` | model of an on-board check: fixed taps, free lanes, lockstep groups; tail beyond a BRAM window |
+| `fpga/check_group.sv` | one lockstep group of check lanes (first cut, for area and clock estimates) |
+| `fpga/synth_check.tcl` | out-of-context place and route of `check_group` on the A7 part |
 | `fpga/synth.tcl` | out-of-context synthesis (+ implementation) of the full core |
 | `fpga/Makefile` | `model`, `sim`, `sim-folded`, `synth`, `impl` (`PART=`, `MHZ=`), `project`, `bit`, `program`, `board` |
 

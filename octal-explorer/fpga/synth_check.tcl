@@ -1,0 +1,69 @@
+# =============================================================================
+# synth_check.tcl -- resource and clock estimate for the split-check lanes
+#
+#   cd fpga/build/check-logs        (Vivado drops its .log/.jou in the cwd)
+#   vivado -mode batch -source ../../synth_check.tcl -tclargs GS W [MHZ]
+#
+# Synthesizes check_group.sv with GS lanes of W pairs per clock, then places
+# and routes it on its own ("out of context": no board, no pins, no top level),
+# on the Nexys A7's part.  The point is a LUT/FF count per lane and whether the
+# lane pipeline makes 200 MHz -- not a usable netlist.
+#
+# Output: fpga/build/check-gs<GS>-w<W>/
+#   clock.xdc         the clock constraint written below
+#   synth_util.rpt    utilization after synthesis
+#   impl_util.rpt     utilization after place and route (the number to quote)
+#   impl_timing.rpt   timing summary after routing (WNS at MHZ)
+#
+# Caveat: in out-of-context mode the ports are not real pins, so the wide `win`
+# and `pre` inputs come for free here.  On the board they are block-RAM outputs;
+# their routing to GS lanes is not part of this estimate.
+#
+# Vivado needs build/compat on LD_LIBRARY_PATH (libncurses.so.5), as for the
+# other scripts in this directory (see the Makefile).
+# =============================================================================
+
+# ---- arguments: group size, pairs per lane and clock, target clock ----
+set gs  [lindex $argv 0]
+set w   [lindex $argv 1]
+set mhz [expr {[llength $argv] > 2 ? [lindex $argv 2] : 200}]
+
+# The Nexys A7-100T's part (Artix-7 100T, speed grade -1), as in create_project.tcl.
+set part xc7a100tcsg324-1
+
+# Paths relative to this script, so the cwd only decides where the logs go.
+set here [file dirname [file normalize [info script]]]
+set out  "$here/build/check-gs$gs-w$w"
+file mkdir $out
+
+# Synthesis and placement use at most 8 threads (the board service and other
+# jobs share the machine).
+set_param general.maxThreads 8
+
+# ---- sources ----
+read_verilog -sv "$here/check_group.sv"
+
+# ---- constraint: one clock on the port clk at MHZ ----
+# Written fresh for each run; the period is 1000 / MHZ ns (5.000 ns at 200 MHz).
+set xdc "$out/clock.xdc"
+set f [open $xdc w]
+puts $f "create_clock -name clk -period [expr {1000.0 / $mhz}] \[get_ports clk\]"
+close $f
+read_xdc -mode out_of_context $xdc
+
+# ---- synthesis ----
+# -mode out_of_context: no I/O buffers are inserted on the ports.
+# -generic overrides the module parameters GS and W.
+synth_design -top check_group -part $part -mode out_of_context -generic GS=$gs -generic W=$w
+report_utilization -file "$out/synth_util.rpt"
+
+# ---- implementation: optimize, place, route ----
+# No phys_opt_design: this is an estimate, and the default flow is closer to
+# what a first board build would get.
+opt_design
+place_design
+route_design
+
+# ---- reports ----
+report_utilization -file "$out/impl_util.rpt"
+report_timing_summary -file "$out/impl_timing.rpt"
