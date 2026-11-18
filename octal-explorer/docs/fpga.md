@@ -563,8 +563,31 @@ What the estimate leaves out:
 * the fallback for the heaps beyond LIM (about 5·10⁻⁵ of the heaps);
 * routing in a chip whose slices are already 92 % occupied.
 
-More speed needs more LUTs: a speculation core folded to P = 16 (12.5 M values/s) would
-leave room for a check that keeps up with it.
+**Folding the speculation core further** frees LUTs for the check.
+`fpga/synth_fold.tcl` generates the core for another P and places and routes the
+whole board design (core, UART, period search) at 200 MHz, without touching the
+board project:
+
+| P | values/s | slots | LUTs (logic + memory) | FFs | slices | WNS | free LUTs |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 25 M | 198 | 41,190 (28,130 + 13,060) | 46,577 | 92 % | +0.280 ns | 22.2k |
+| 12 | 16.7 M | 132 | 34,948 (21,874 + 13,074) | 37,484 | 79 % | +0.104 ns | 28.5k |
+| 16 | 12.5 M | 99 | 29,757 (16,692 + 13,065) | 32,556 | 76 % | +0.124 ns | 33.6k |
+
+Only the tap logic shrinks. The history (13k LUTs of shift registers) stays,
+and so does the LUT-RAM left for the lanes: about 5.9k LUTs, enough for about
+950 lanes. With 16-lane groups at 1,205 LUTs each:
+
+| P | LUTs for the check | groups | verified heaps/s | limited by |
+|---:|---:|---:|---:|---|
+| 8 | 20k | 16 | ≈ 8.7 M | check |
+| 12 | 25k | 20 | ≈ 10.9 M | check |
+| 16 | 24k (85 % of the chip in all) | 20 | ≈ 10.9 M | check |
+| 16 | 28k (91 %) | 23 | ≈ 12.5 M | core |
+
+So P = 16 lets the check nearly keep up with the core: 11–12.5 M verified values
+per second, depending on how full the chip can be routed. That is 3 times
+`octal --rare`, and 1.4·10¹⁴ in 4–5 months on the board alone.
 
 ## Period search
 
@@ -688,6 +711,7 @@ reusing old results, in these cases:
 | `fpga/tb_check_group_lr.sv`, `fpga/sim_check_group_lr.sh` | xsim: each lane's done against the model's witness depth |
 | `fpga/tb_check_cluster.sv`, `fpga/sim_check_cluster.sh` | xsim: the cluster's failed heaps against depth ≥ LIM |
 | `fpga/gen_check_vectors.py` | test vectors: G from octal and the witness depth of each heap |
+| `fpga/synth_fold.tcl` | place and route of the whole board design for another fold P (no bitstream) |
 | `fpga/synth_check.tcl` | out-of-context place and route of `check_group`, `check_group_lr` or `check_cluster` on the A7 part |
 | `fpga/synth.tcl` | out-of-context synthesis (+ implementation) of the full core |
 | `fpga/Makefile` | `model`, `sim`, `sim-folded`, `synth`, `impl` (`PART=`, `MHZ=`), `project`, `bit`, `program`, `board` |
