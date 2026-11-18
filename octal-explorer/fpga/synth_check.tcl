@@ -2,14 +2,19 @@
 # synth_check.tcl -- resource and clock estimate for the split-check lanes
 #
 #   cd fpga/build/check-logs        (Vivado drops its .log/.jou in the cwd)
-#   vivado -mode batch -source ../../synth_check.tcl -tclargs GS W [MHZ]
+#   vivado -mode batch -source ../../synth_check.tcl -tclargs GS W [MHZ] [TOP]
 #
-# Synthesizes check_group.sv with GS lanes of W pairs per clock, then places
+# TOP is check_group (default), check_group_lr (the LUT-RAM lanes; W must
+# be 1 there, it has no W parameter) or check_cluster (NS groups of GS LUT-RAM
+# lanes with their block RAMs; the second argument is then NS).
+#
+# Synthesizes TOP with GS lanes of W pairs per clock, then places
 # and routes it on its own ("out of context": no board, no pins, no top level),
 # on the Nexys A7's part.  The point is a LUT/FF count per lane and whether the
 # lane pipeline makes 200 MHz -- not a usable netlist.
 #
-# Output: fpga/build/check-gs<GS>-w<W>/
+# Output: fpga/build/check-gs<GS>-w<W>/ (check_group_lr: check-lr-gs<GS>/,
+# check_cluster: check-cl-gs<GS>-ns<NS>/)
 #   clock.xdc         the clock constraint written below
 #   synth_util.rpt    utilization after synthesis
 #   impl_util.rpt     utilization after place and route (the number to quote)
@@ -27,13 +32,19 @@
 set gs  [lindex $argv 0]
 set w   [lindex $argv 1]
 set mhz [expr {[llength $argv] > 2 ? [lindex $argv 2] : 200}]
+set top [expr {[llength $argv] > 3 ? [lindex $argv 3] : "check_group"}]
 
 # The Nexys A7-100T's part (Artix-7 100T, speed grade -1), as in create_project.tcl.
 set part xc7a100tcsg324-1
 
 # Paths relative to this script, so the cwd only decides where the logs go.
 set here [file dirname [file normalize [info script]]]
-set out  "$here/build/check-gs$gs-w$w"
+switch $top {
+    check_group    { set out "$here/build/check-gs$gs-w$w" }
+    check_group_lr { set out "$here/build/check-lr-gs$gs" }
+    check_cluster  { set out "$here/build/check-cl-gs$gs-ns$w" }
+    default        { error "unknown TOP $top" }
+}
 file mkdir $out
 
 # Synthesis and placement use at most 8 threads (the board service and other
@@ -41,7 +52,11 @@ file mkdir $out
 set_param general.maxThreads 8
 
 # ---- sources ----
-read_verilog -sv "$here/check_group.sv"
+if {$top eq "check_cluster"} {
+    read_verilog -sv [list "$here/check_group_lr.sv" "$here/check_stream.sv" "$here/check_cluster.sv"]
+} else {
+    read_verilog -sv "$here/$top.sv"
+}
 
 # ---- constraint: one clock on the port clk at MHZ ----
 # Written fresh for each run; the period is 1000 / MHZ ns (5.000 ns at 200 MHz).
@@ -53,8 +68,12 @@ read_xdc -mode out_of_context $xdc
 
 # ---- synthesis ----
 # -mode out_of_context: no I/O buffers are inserted on the ports.
-# -generic overrides the module parameters GS and W.
-synth_design -top check_group -part $part -mode out_of_context -generic GS=$gs -generic W=$w
+# -generic overrides the module parameters GS and W (check_group_lr has no W;
+# check_cluster takes NS instead).
+set generics [list -generic GS=$gs]
+if {$top eq "check_group"}   { lappend generics -generic W=$w }
+if {$top eq "check_cluster"} { lappend generics -generic NS=$w }
+synth_design -top $top -part $part -mode out_of_context {*}$generics
 report_utilization -file "$out/synth_util.rpt"
 
 # ---- implementation: optimize, place, route ----

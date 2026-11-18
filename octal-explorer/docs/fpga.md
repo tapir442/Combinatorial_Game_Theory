@@ -337,8 +337,9 @@ chip can expect somewhere around 200–250 MHz at best.
   fails, because the step-2 witnesses of Officers are deep (*Witness depth*,
   below). Lanes that stream the pairs out of block RAM and stop at the last
   witness, with DDR2 for the rare deep heaps, would fit. But beside the
-  speculation core they verify only about 4 M values/s, about as fast as
-  `octal --rare` on 24 threads (*Split check with lanes*, below).
+  speculation core they verified only about 4 M values/s, about as fast as
+  `octal --rare` on 24 threads (*Split check with lanes*, below). Cheaper
+  lanes in LUT-RAM roughly double that, to about 8.7 M/s (*Cheaper lanes*, below).
 * **Host interface.** The UART (2 Mbaud) is enough for loading, CRC runs and
   spot checks. It is not enough to stream every value (about 100k values/s).
   The full core would need PCIe/DMA (1 byte per value: about 230 MB/s).
@@ -466,7 +467,104 @@ three builds; the W = 8 group has not been built.
 So for now verification stays on the CPU, and the board stays a speculation and
 search engine (long runs, maxima, and the period search below). A board check is worth
 building only with a much cheaper lane. Most of a lane's area goes to the
-256-bit missing set, so that is where to look first.
+256-bit missing set, so that is where to look first. The next section does that.
+
+### Cheaper lanes: LUT-RAM and a counter
+
+`fpga/check_group_lr.sv` changes how a lane keeps track of the values.
+
+* **Seen, not missing.** The lane keeps the values it has *seen*, as 256 bits
+  of LUT-RAM (32 words of 8 bits). Each pair does one read-modify-write:
+  asynchronous read, write on the clock edge, no forwarding needed.
+* **A counter instead of a test for empty.** `left` starts at R(g), the number of
+  rare-class values below g. It counts down on every newly seen one, and the lane
+  is done at 0.
+* **Self-clearing.** At the end of a heap the set holds exactly the values below g.
+  The lane clears it in 32 clocks, usually while the rest of its group is still
+  scanning.
+* **The rare-G(a) test once per group.** A pair is rare-class exactly when
+  G(a) is common, given that G(m−a) is common, which holds for n ≥ 100,000.
+  So the test is done once on the broadcast G(a), not in every lane.
+
+Three changes were needed to meet 200 MHz:
+* R(g) as a constant table: computed from g it becomes a 512-input adder tree;
+* the read address without the clear mux, using a simple-dual-port RAM;
+* a write enable that does not wait for the read. Writing `word | bit` back
+  over a set bit changes nothing.
+
+| group (lanes only) | LUTs (LUT-RAM) | FFs | WNS |
+|---:|---:|---:|---:|
+| 4 lanes | 239 (24) | 182 | +0.236 ns |
+| 16 lanes | 897 (96) | 630 | +0.077 ns |
+| 64 lanes | 3,568 (384) | 2,410 | +0.000 ns |
+
+**About 56 LUTs per lane**, against about 430 for `check_group.sv`.
+
+**Feeding the groups.** With lanes this cheap there are tens of groups, and each
+needs its own stream of G(a) and G(m−a). Narrow block-RAM ports would run out.
+`fpga/check_cluster.sv` therefore has the following parts:
+
+* **Wide memories.** The prefix G(0 … KP−1) and a ring of the last KW values
+  are stored in words of 16 values (144 bits). Writes use 9-bit byte enables.
+* **Time slots.** Each memory has one read port, shared by NS ≤ 13 groups.
+  Group s gets a word every NS clocks.
+* **Stream readers** (`fpga/check_stream.sv`). There are two per group, one
+  going up the prefix and one going down the window. Each keeps two words in
+  ping-pong and offers one value per clock.
+* **Window shift register.** A shift register of GS values turns the window
+  stream into the lanes' G(m₀+l−a).
+* **Jobs and results.** A job is GS heaps with g and R(g), loaded into all lanes
+  at once. A result is n₀ plus the lanes not done after LIM pairs; those heaps
+  go to the fallback. A failed lane is aborted and clears itself.
+
+Timing needed registered job acceptance, a registered count (`hit_q`), a
+two-stage result mux, a registered abort, and the ping-pong buffers. The
+buffers keep the wide enables off the path through the step decision.
+
+`tb_check_cluster.sv` (`sim_check_cluster.sh`) runs the cluster on real G
+values from octal. A heap must fail exactly when its witness depth is ≥ LIM:
+
+| GS × NS | LIM | heaps from | failed (expected) | errors |
+|---|---:|---:|---:|---:|
+| 16 × 8 | 4,096 | 10⁶ | 69 (69) | 0 |
+| 16 × 13 | 16,384 | 10⁶ | 0 (0) | 0 |
+| 16 × 16 | 4,096 | 10⁶ | 469 (469) | 0 |
+| 8 × 8 | 8,192 | 10⁵ | 1 (1) | 0 |
+| 32 × 4 | 8,192 | 2·10⁶ | 0 (0) | 0 |
+
+The 16 × 13 run takes 28.3 clocks per heap once the window is filled. The
+model predicts 28.3: mean group maximum 5,820, plus about 70 clocks per job,
+over 208 lanes. `tb_check_group_lr.sv` checks each lane alone: `done` comes
+exactly 4 clocks after the model's witness depth (1,724 heaps, GS = 1, 4, 16).
+
+Cluster out of context (KP = 16,384, KW = 32,768, LIM = 16,384; 12 RAMB36 each):
+
+| GS × NS | lanes | LUTs (LUT-RAM) | FFs | WNS | LUTs per group |
+|---|---:|---:|---:|---:|---:|
+| 16 × 8 | 128 | 9,744 (776) | 12,315 | +0.183 ns | |
+| 16 × 12 | 192 | 14,564 (1,168) | 18,264 | +0.132 ns | 1,205 (marginal) |
+| 8 × 12 | 96 | 8,970 (592) | 13,500 | +0.220 ns | ≈ 750 |
+
+A group thus costs its lanes plus **about 300 LUTs** for the streams (two 32:1
+value muxes), the shift register and the state machine.
+
+**What it gives.** About 20k LUTs are free beside the speculation core (P = 8):
+
+| GS | LUTs per group | groups | lanes | verified heaps/s at 200 MHz |
+|---:|---:|---:|---:|---:|
+| 8 | ≈ 750 | 26 | 208 | ≈ 8.0 M |
+| 16 | 1,205 | 16 | 256 | ≈ 8.7 M |
+| 32 | ≈ 2,100 (not built) | 9 | 288 | ≈ 8.8 M |
+
+That is about twice the old design (4 M/s) and 2.3 times `octal --rare` on 24
+threads, so Grossman's 1.4·10¹⁴ would take about 6 months on the board.
+What the estimate leaves out:
+* the job builder, which computes R(g) from the core's values and writes the ring;
+* the fallback for the heaps beyond LIM (about 5·10⁻⁵ of the heaps);
+* routing in a chip whose slices are already 92 % occupied.
+
+More speed needs more LUTs: a speculation core folded to P = 16 (12.5 M values/s) would
+leave room for a check that keeps up with it.
 
 ## Period search
 
@@ -584,7 +682,13 @@ reusing old results, in these cases:
 | `fpga/tb_window_fp.sv`, `fpga/check_window_fp.py`, `fpga/sim_window_fp.sh` | xsim test of `window_fp` against Python |
 | `fpga/split_model.c` | model of an on-board check: fixed taps, free lanes, lockstep groups; tail beyond a BRAM window |
 | `fpga/check_group.sv` | one lockstep group of check lanes (first cut, for area and clock estimates) |
-| `fpga/synth_check.tcl` | out-of-context place and route of `check_group` on the A7 part |
+| `fpga/check_group_lr.sv` | lockstep group of cheaper lanes: seen set in LUT-RAM, counter, self-clear |
+| `fpga/check_stream.sv` | one value per clock out of a wide block RAM shared in time slots |
+| `fpga/check_cluster.sv` | NS lane groups with prefix and window RAMs, jobs in, unsettled heaps out |
+| `fpga/tb_check_group_lr.sv`, `fpga/sim_check_group_lr.sh` | xsim: each lane's done against the model's witness depth |
+| `fpga/tb_check_cluster.sv`, `fpga/sim_check_cluster.sh` | xsim: the cluster's failed heaps against depth ≥ LIM |
+| `fpga/gen_check_vectors.py` | test vectors: G from octal and the witness depth of each heap |
+| `fpga/synth_check.tcl` | out-of-context place and route of `check_group`, `check_group_lr` or `check_cluster` on the A7 part |
 | `fpga/synth.tcl` | out-of-context synthesis (+ implementation) of the full core |
 | `fpga/Makefile` | `model`, `sim`, `sim-folded`, `synth`, `impl` (`PART=`, `MHZ=`), `project`, `bit`, `program`, `board` |
 
