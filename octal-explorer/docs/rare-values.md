@@ -3,8 +3,7 @@
 `--rare` (C: `octal_extend_rare`, Python: `method="rare"`) implements the *rare-value
 algorithm* as described by J.P. Grossman, **Searching for periodicity in Officers**, *Games of
 No Chance 5*, MSRI Publications 70 (2017), 373–385
-([PDF](https://library.slmath.org/books/Book70/files/1016.pdf); a copy is in
-`literature/Grossman-2017-Searching-for-periodicity-in-Officers.pdf`).  Grossman credits the
+([PDF](https://library.slmath.org/books/Book70/files/1016.pdf)).  Grossman credits the
 algorithm to *Winning Ways*.  He used it, with further optimisations, to compute more than
 140 trillion (≈ 2⁴⁷) values of Officers (`.6`) without finding a period.
 

@@ -8,3 +8,6 @@ auto-save-list/
 tramp
 flycheck_*.el
 .dir-locals-2.el
+
+# third-party papers: kept locally, not redistributed
+literature/*.pdf
