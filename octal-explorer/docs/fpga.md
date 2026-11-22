@@ -240,6 +240,22 @@ Each `c` reply also carries the block's maximum and where it first occurs, so a
 long run logs every new overall maximum, e.g. `new maximum: G(19,739,543) = 325`
 (confirmed by octal: the first 325 and the maximum up to there).
 
+The new maxima of the long run so far (`fpga/build/board-run.log`; it started at
+n = 50,000 with maximum G(18,855) = 284 and was at n ≈ 7.97 · 10¹² on 2026-11-22):
+
+| value | first at n |
+|---|---|
+| 325 | 19,739,543 |
+| 328 | 1,560,624,296 |
+| 335 | 2,135,301,625 |
+| 363 | 7,775,706,554 |
+| 386 | 374,602,320,656 |
+| 387 | 4,192,840,003,089 |
+| 388 | 7,014,808,364,046 |
+
+All seven lie below 1.4 · 10¹⁴, so Grossman's computation confirms that there are
+no new rare values up to there, and these speculated values are the true G(n).
+
 **Checkpoints.** The board needs only its history, the last 20,627 values. `D`
 dumps it in 0.2 s. The history shift register is rotated once around through the
 fast-load path: the core outputs its oldest entry (`tail`), and the top feeds it
